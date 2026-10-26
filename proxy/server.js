@@ -19,6 +19,9 @@ const UPSTREAM_HOST = 'xiaohuanxiong.com';
 const LOGIN_URL_PATH = '/api/iam/v1/auth/login/password/phone';
 const CONFIRM_URL_PATH = '/api/web/auth/v1/iam/confirm';
 const CHAT_URL_PATH = '/api/web/llm/v2/chat/completions';
+const CATALOG_URL_PATH = '/api/web/llm/v2/model_catalog';
+const CATALOG_TTL_MS = 10 * 60 * 1000;
+const UPSTREAM_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
 
@@ -157,13 +160,108 @@ async function getToken(forceRefresh = false) {
   return tokenPromise;
 }
 
-// 已知可用模型名(上游统一路由,model 字段仅作展示/透传)
-const KNOWN_MODELS = [
+// 目录不可用时的兜底模型名(上游对未知名称按默认模型路由)
+const FALLBACK_MODELS = [
   { id: 'SenseChat-5', note: '默认对话模型' },
   { id: 'SenseChat-5-Vision', note: '视觉模型(多模态消息格式)' },
   { id: 'sensenova-u1-pro', note: 'U1 Pro' },
   { id: 'sensenova-u1.5-lite', note: 'U1.5 Lite' },
 ];
+
+// ---- 上游模型目录 + 账号状态探针(目录 GET 不消耗积分) ----
+let catalogCache = { at: 0, models: null, defaultModel: null };
+let upstreamStatus = { state: 'checking', checkedAt: null, error: '', modelCount: 0 };
+let upstreamCheckInFlight = null;
+
+async function fetchCatalog(force = false) {
+  if (!force && catalogCache.models && Date.now() - catalogCache.at < CATALOG_TTL_MS) return catalogCache;
+  const pull = async (token) => {
+    const res = await request('GET', CATALOG_URL_PATH, { token, timeoutMs: 15000 });
+    const text = await readJsonBody(res);
+    return { res, text };
+  };
+  let token = await getToken();
+  let { res, text } = await pull(token);
+  if (res.statusCode === 401 || res.statusCode === 403) {
+    token = await getToken(true); // token 失效,强制重登一次
+    ({ res, text } = await pull(token));
+  }
+  if (res.statusCode !== 200) throw new Error(`catalog HTTP ${res.statusCode}`);
+  const json = JSON.parse(text);
+  const models = [];
+  let defaultModel = null;
+  for (const cat of json?.data?.categories || []) {
+    if (cat.default_model) defaultModel = cat.default_model;
+    for (const m of cat?.models || []) {
+      models.push({
+        id: m.name,
+        display: m.description || m.name,
+        note: m.display_description || '',
+        billing: m.billing_category || '',
+        visible: m.visible !== false,
+      });
+    }
+  }
+  if (!models.length) throw new Error('empty catalog');
+  catalogCache = { at: Date.now(), models, defaultModel };
+  return catalogCache;
+}
+
+function classifyUpstreamError(e) {
+  const msg = String(e?.message || e);
+  if (/账号未配置/.test(msg)) return 'no_account';
+  if (/登录失败|login failed|password/i.test(msg)) return 'login_failed';
+  if (/timeout|ENOTFOUND|ECONNREFUSED|EAI_AGAIN|ETIMEDOUT|network/i.test(msg)) return 'unreachable';
+  return 'error';
+}
+
+async function refreshUpstream() {
+  if (!upstreamCheckInFlight) {
+    upstreamCheckInFlight = (async () => {
+      try {
+        const cat = await fetchCatalog();
+        upstreamStatus = {
+          state: 'ok',
+          checkedAt: new Date().toISOString(),
+          error: '',
+          modelCount: cat.models.filter((m) => m.visible).length,
+        };
+        log(`upstream ok: ${upstreamStatus.modelCount} visible models (default ${cat.defaultModel || '?'})`);
+      } catch (e) {
+        const state = classifyUpstreamError(e);
+        upstreamStatus = { state, checkedAt: new Date().toISOString(), error: String(e?.message || e).slice(0, 200) };
+        log(`upstream ${state}: ${upstreamStatus.error}`);
+      }
+    })().finally(() => {
+      upstreamCheckInFlight = null;
+    });
+  }
+  return upstreamCheckInFlight;
+}
+
+function upstreamSnapshot() {
+  // 超过 1 分钟未检查就后台刷新,/health 立即返回缓存值不阻塞
+  if (!upstreamStatus.checkedAt || Date.now() - new Date(upstreamStatus.checkedAt).getTime() > 60000) {
+    refreshUpstream().catch(() => {});
+  }
+  return upstreamStatus;
+}
+
+function modelListForApi() {
+  if (catalogCache.models) {
+    return catalogCache.models.map((m) => ({
+      id: m.id,
+      object: 'model',
+      created: 1700000000,
+      owned_by: 'raccoon-proxy',
+      display: m.display,
+      note: m.note,
+      billing: m.billing,
+      visible: m.visible,
+    }));
+  }
+  return FALLBACK_MODELS.map((m) => ({ id: m.id, object: 'model', created: 1700000000, owned_by: 'raccoon-proxy', note: m.note, fallback: true }));
+}
 
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
@@ -208,7 +306,7 @@ async function proxyChat(req, res) {
   if (!Array.isArray(payload.messages)) {
     return sendJson(res, 400, { error: { message: 'messages must be an array', type: 'invalid_request_error' } });
   }
-  if (typeof payload.model !== 'string' || !payload.model) payload.model = 'SenseChat-5';
+  if (typeof payload.model !== 'string' || !payload.model) payload.model = catalogCache.defaultModel || 'SenseChat-5';
 
   const isStream = payload.stream === true;
   const jsonBody = JSON.stringify(payload);
@@ -269,9 +367,13 @@ const server = http.createServer(async (req, res) => {
 
   try {
     if (route === 'GET /v1/models' || route === 'GET /models') {
+      try {
+        await fetchCatalog(); // 命中缓存时零开销;未命中时拉一次目录(401 自动重登)
+      } catch {}
       return sendJson(res, 200, {
         object: 'list',
-        data: KNOWN_MODELS.map((m) => ({ id: m.id, object: 'model', created: 1700000000, owned_by: 'raccoon-proxy', note: m.note })),
+        default_model: catalogCache.defaultModel,
+        data: modelListForApi(),
       });
     }
 
@@ -280,8 +382,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === 'GET /health') {
-      const token = await getToken();
-      return sendJson(res, 200, { ok: true, token_exp: new Date(jwtExp(token)).toISOString(), models: KNOWN_MODELS.map((m) => m.id) });
+      const out = { ok: true, upstream: upstreamSnapshot(), models: modelListForApi(), default_model: catalogCache.defaultModel };
+      try {
+        const token = await getToken();
+        out.token_exp = new Date(jwtExp(token)).toISOString();
+      } catch (e) {
+        out.token_exp = null;
+        out.upstream = { state: classifyUpstreamError(e), checkedAt: new Date().toISOString(), error: String(e?.message || e).slice(0, 200) };
+      }
+      return sendJson(res, 200, out);
     }
 
     return sendJson(res, 404, { error: { message: `unknown route ${route}`, type: 'invalid_request_error' } });
@@ -302,6 +411,8 @@ server.on('error', (e) => {
 
 server.listen(PORT, HOST, async () => {
   log(`listening on http://${HOST}:${PORT}/v1`);
+  refreshUpstream().catch(() => {}); // 启动即做一次目录拉取 + 账号状态检查
+  setInterval(() => refreshUpstream().catch(() => {}), UPSTREAM_CHECK_INTERVAL_MS);
   try {
     const token = await getToken();
     const exp = jwtExp(token);

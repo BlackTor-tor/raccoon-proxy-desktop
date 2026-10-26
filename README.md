@@ -8,11 +8,12 @@
 
 - **一键启停**:仪表盘开关网关服务,关窗最小化到托盘,服务持续运行
 - **OpenAI 兼容**:`/v1/chat/completions`(支持 SSE 流式)、`/v1/models`、`/health`
+- **动态模型目录**:模型列表实时来自上游目录(自动刷新,含 GLM-5-3、Kimi-K3、DeepSeek-V4.1-Flash、SenseNova-6.8 等),真实路由到不同模型
+- **上游状态监测**:仪表盘实时显示上游/账号状态(每分钟探测、5 分钟全量刷新),token 失效自动重登,登录失败/上游不可达即时提示
 - **自动登录**:账号只填一次,token 自动缓存与续期(30 天有效),失效自动重登
 - **实时日志**:请求状态、耗时、上游错误实时可见
 - **Playground**:内置对话测试,流式输出,装完即可自检
 - **本地鉴权(可选)**:给本地端口加一道 Bearer API Key
-- **模型**:SenseChat-5 / SenseChat-5-Vision / sensenova-u1-pro / sensenova-u1.5-lite
 
 ## 快速开始
 
@@ -39,6 +40,8 @@ print(resp.choices[0].message.content)
 ```
 
 > API Key 默认不校验(任意值可用);若在设置里配置了本地 API Key,则必须携带该值。
+>
+> `GET /v1/models` 返回上游实时模型目录;`GET /health` 返回上游状态(`upstream.state`:ok / login_failed / unreachable / no_account)与 token 有效期,可作为监控探针。
 
 ## 从源码运行
 
