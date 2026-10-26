@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">RaccoonProxy</title>
+  <desc id="desc">绿色圆角方形中的几何卡通浣熊头像</desc>
+  <rect width="256" height="256" rx="64" fill="oklch(58% 0.16 145)"/>
+  <path d="M55 111 45 55Q44 43 57 48l50 27m42 0 50-27q13-5 12 7l-10 56" fill="oklch(25% 0.025 240)"/>
+  <path d="m59 62 7 40 28-21Zm138 0-35 19 28 21Z" fill="oklch(83% 0.04 145)"/>
+  <path d="M128 66c-46 0-82 30-87 72-3 28 29 62 87 80 58-18 90-52 87-80-5-42-41-72-87-72Z" fill="oklch(95% 0.015 145)"/>
+  <path d="M48 125c17-15 35-20 52-11l28 20 28-20c17-9 35-4 52 11l-8 35-46 15-26-26-26 26-46-15Z" fill="oklch(25% 0.025 240)"/>
+  <ellipse cx="88" cy="140" rx="10" ry="12" fill="oklch(98% 0.005 250)"/>
+  <ellipse cx="168" cy="140" rx="10" ry="12" fill="oklch(98% 0.005 250)"/>
+  <path d="M109 170q19-13 38 0-2 16-19 22-17-6-19-22Z" fill="oklch(25% 0.025 240)"/>
+  <path d="M128 189v11m-12-1q12 9 24 0" fill="none" stroke="oklch(25% 0.025 240)" stroke-width="5" stroke-linecap="round"/>
+</svg>

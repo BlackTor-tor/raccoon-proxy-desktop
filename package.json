@@ -1,0 +1,62 @@
+{
+  "name": "raccoon-proxy-desktop",
+  "productName": "RaccoonProxy",
+  "version": "1.0.0",
+  "description": "RaccoonProxy — 本地 OpenAI 兼容 API 网关桌面客户端",
+  "main": "electron-main.js",
+  "author": "BlackTor-tor",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "icon": "node scripts/gen-icon.js",
+    "dist": "electron-builder --win nsis portable"
+  },
+  "devDependencies": {
+    "electron": "^38.0.0",
+    "electron-builder": "^26.0.0",
+    "sharp": "^0.34.0"
+  },
+  "build": {
+    "appId": "com.blacktor.raccoonproxy",
+    "productName": "RaccoonProxy",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron-main.js",
+      "preload.js",
+      "renderer/**",
+      "proxy/**",
+      "assets/**",
+      "package.json"
+    ],
+    "win": {
+      "icon": "assets/icon.png",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "RaccoonProxy"
+    }
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BlackTor-tor/raccoon-proxy-desktop"
+  }
+}

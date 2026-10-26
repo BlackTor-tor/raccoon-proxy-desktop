@@ -4,3 +4,4 @@ dist/
 .token
 .env
 *.local
+shot*.png
