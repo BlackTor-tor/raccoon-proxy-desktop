@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>方向三 · 纸面台账</title>
+<style>
+/* 纸面台账 — 编辑排印派(瑞士网格 + 账房单据隐喻)
+ * 纸白底、零圆角、双线分区;层级靠字号字重而非颜色;唯一的朱砂色是浣熊印章;
+ * 字阶 12/14/17/22/34;标题楷体、正文黑体、数字等宽。 */
+:root {
+  --paper: #f7f5f0; --paper-2: #efede6; --rule: #d9d5c9; --rule-2: #b8b4a5;
+  --ink: #22201b; --ink-2: #5c594e; --ink-3: #8f8b7c;
+  --seal: #b5472c; --green: #3a6b4a;
+  --disp: KaiTi, "KaiTi SC", "DFKai-SB", "Microsoft YaHei", serif;
+  --sans: "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { background: var(--paper); color: var(--ink); font: 14px/1.7 var(--sans); -webkit-font-smoothing: antialiased; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; }
+
+.frame { display: grid; grid-template-columns: 224px minmax(0, 1fr); height: 100vh; }
+
+/* 左栏:纯文字导航 + 印章 */
+.nav-col { border-right: 2px solid var(--ink); padding: 40px 32px; display: flex; flex-direction: column; }
+.nav-col .masthead { font-family: var(--disp); font-size: 22px; letter-spacing: 0.08em; }
+.nav-col .sub { font-size: 12px; color: var(--ink-3); letter-spacing: 0.35em; margin-top: 4px; }
+.nav-col .seal { width: 44px; height: 44px; margin-top: 20px; transform: rotate(-4deg); }
+.nav-col nav { margin-top: 56px; display: grid; gap: 2px; }
+.nav-col nav button { text-align: left; font-size: 15px; padding: 9px 0 9px 16px; border-left: 2px solid transparent; color: var(--ink-2); }
+.nav-col nav button:hover { color: var(--ink); }
+.nav-col nav button.active { color: var(--ink); border-left-color: var(--seal); font-weight: 600; padding-left: 14px; }
+.nav-col .foot { margin-top: auto; font-size: 12px; color: var(--ink-3); line-height: 2; }
+.nav-col .foot .num { font-family: var(--mono); }
+
+/* 内容:单据式分区,统一页边距 */
+.sheet { overflow: auto; padding: 40px 48px 56px; }
+.sheet-head { display: flex; align-items: flex-end; justify-content: space-between; border-bottom: 2px solid var(--ink); padding-bottom: 20px; }
+.sheet-head h1 { font-family: var(--disp); font-size: 34px; letter-spacing: 0.04em; font-weight: 600; }
+.sheet-head .no { text-align: right; font-size: 12px; color: var(--ink-2); line-height: 1.9; }
+.sheet-head .no b { color: var(--seal); font-family: var(--disp); font-size: 17px; letter-spacing: 0.1em; }
+
+/* 状态横排:大字 + 台账行 */
+.status-band { display: grid; grid-template-columns: 220px 1fr; border-bottom: 1px solid var(--rule-2); }
+.status-band .big { padding: 28px 0; border-right: 1px solid var(--rule); font-family: var(--disp); font-size: 22px; color: var(--green); display: flex; align-items: center; gap: 14px; }
+.status-band .big::before { content: "●"; font-size: 12px; }
+.status-band dl { display: grid; grid-template-columns: repeat(4, 1fr); }
+.status-band dl > div { padding: 28px 0 28px 28px; }
+.status-band dt { font-size: 12px; color: var(--ink-3); }
+.status-band dd { font-size: 17px; margin-top: 6px; font-variant-numeric: tabular-nums; }
+.status-band dd small { font-size: 12px; color: var(--ink-3); font-weight: 400; }
+
+section.grid-2 { display: grid; grid-template-columns: minmax(0, 5fr) minmax(0, 7fr); border-bottom: 1px solid var(--rule-2); }
+section .cell { padding: 28px 0; }
+section .cell + .cell { border-left: 1px solid var(--rule); padding-left: 36px; }
+section .cell:first-child { padding-right: 36px; }
+h2.sec { font-size: 13px; letter-spacing: 0.28em; color: var(--ink-2); margin-bottom: 18px; font-weight: 600; }
+
+.entry { display: grid; grid-template-columns: 72px 1fr auto; gap: 16px; align-items: baseline; padding: 10px 0; border-bottom: 1px dashed var(--rule); }
+.entry:last-child { border-bottom: 0; }
+.entry .k { font-size: 13px; color: var(--ink-2); }
+.entry .v { font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.entry .copy { font-size: 13px; color: var(--seal); border-bottom: 1px solid currentColor; padding-bottom: 1px; }
+.entry .copy:hover { color: var(--ink); }
+
+/* 台账表:模型即账目行 */
+table.ledger { width: 100%; border-collapse: collapse; font-size: 14px; }
+table.ledger th { font-size: 12px; font-weight: 600; color: var(--ink-3); text-align: left; padding: 0 14px 10px 0; border-bottom: 1px solid var(--ink); letter-spacing: 0.06em; }
+table.ledger th.num, table.ledger td.num { text-align: right; font-family: var(--mono); font-size: 13px; }
+table.ledger td { padding: 12px 14px 12px 0; border-bottom: 1px solid var(--rule); }
+table.ledger td .note { font-size: 12px; color: var(--ink-3); margin-top: 2px; }
+table.ledger .type { font-family: var(--disp); font-size: 14px; color: var(--green); }
+table.ledger .type.lite { color: var(--seal); }
+
+/* 日志:墨行 */
+.logbook { padding: 28px 0; }
+.logbook .row { display: grid; grid-template-columns: 76px 48px 1fr 60px; gap: 18px; font-family: var(--mono); font-size: 12.5px; padding: 7px 0; border-bottom: 1px dotted var(--rule); color: var(--ink-2); }
+.logbook .row .s { text-align: right; }
+.logbook .row .s.ok { color: var(--green); font-weight: 600; }
+.logbook .row .s.err { color: var(--seal); font-weight: 600; }
+.logbook .row .ms { text-align: right; color: var(--ink-3); }
+</style>
+</head>
+<body>
+<div class="frame">
+  <aside class="nav-col">
+    <div>
+      <div class="masthead">RaccoonProxy</div>
+      <div class="sub">本地网关 · 台账</div>
+    </div>
+    <svg class="seal" viewBox="0 0 256 256"><rect width="256" height="256" rx="28" fill="none" stroke="#b5472c" stroke-width="10"/><path d="M55 111 45 55Q44 43 57 48l50 27m42 0 50-27q13-5 12 7l-10 56" fill="#b5472c"/><path d="M128 66c-46 0-82 30-87 72-3 28 29 62 87 80 58-18 90-52 87-80-5-42-41-72-87-72Z" fill="none" stroke="#b5472c" stroke-width="10"/><path d="M48 125c17-15 35-20 52-11l28 20 28-20c17-9 35-4 52 11l-8 35-46 15-26-26-26 26-46-15Z" fill="#b5472c"/><ellipse cx="88" cy="140" rx="10" ry="12" fill="#f7f5f0"/><ellipse cx="168" cy="140" rx="10" ry="12" fill="#f7f5f0"/><path d="M109 170q19-13 38 0-2 16-19 22-17-6-19-22Z" fill="#b5472c"/></svg>
+    <nav>
+      <button class="active">仪表盘</button>
+      <button>对话调试</button>
+      <button>设置</button>
+    </nav>
+    <div class="foot">
+      桌面客户端 <span class="num">v1.3.0</span><br>
+      仅监听 <span class="num">127.0.0.1</span>
+    </div>
+  </aside>
+  <main class="sheet">
+    <div class="sheet-head">
+      <h1>网关台账</h1>
+      <div class="no">
+        <b>运行中</b><br>
+        检测于 15:42 · token 三十日后到期
+      </div>
+    </div>
+    <div class="status-band">
+      <div class="big">服务正常</div>
+      <dl>
+        <div><dt>监听地址</dt><dd><span style="font-family:var(--mono);font-size:14px">127.0.0.1:8317</span></dd></div>
+        <div><dt>今日请求</dt><dd>128 <small>次</small></dd></div>
+        <div><dt>失败</dt><dd>0 <small>次</small></dd></div>
+        <div><dt>平均延迟</dt><dd>1.24 <small>秒</small></dd></div>
+      </dl>
+    </div>
+    <section class="grid-2">
+      <div class="cell">
+        <h2 class="sec">接入信息</h2>
+        <div class="entry"><span class="k">地址</span><span class="v">http://127.0.0.1:8317/v1</span><button class="copy">抄录</button></div>
+        <div class="entry"><span class="k">密钥</span><span class="v">未设置 · 任意值可用</span><button class="copy">抄录</button></div>
+      </div>
+      <div class="cell">
+        <h2 class="sec">可用模型</h2>
+        <table class="ledger">
+          <thead><tr><th>模型</th><th>适用</th><th style="width:64px">计费</th><th class="num" style="width:72px">今日调用</th></tr></thead>
+          <tbody>
+            <tr><td>GLM-5-3</td><td><div>复杂办公与代码</div><div class="note">图像识别 · 调试</div></td><td class="type">标准</td><td class="num">64</td></tr>
+            <tr><td>Kimi-K3</td><td><div>复杂办公与代码</div><div class="note">综合分析</div></td><td class="type">标准</td><td class="num">31</td></tr>
+            <tr><td>DeepSeek-V4.1-Flash</td><td><div>通用对话与推理</div><div class="note">代码开发</div></td><td class="type">标准</td><td class="num">19</td></tr>
+            <tr><td>SenseNova-6.8-Flash</td><td><div>轻量问答与摘要</div><div class="note">响应更快</div></td><td class="type lite">轻量</td><td class="num">11</td></tr>
+            <tr><td>SenseNova-6.8-Flash-Lite</td><td><div>轻量改写</div><div class="note">最经济</div></td><td class="type lite">轻量</td><td class="num">3</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    <section class="logbook">
+      <h2 class="sec">请求日志</h2>
+      <div class="row"><span>15:42:11</span><span class="s ok">200</span><span>POST /v1/chat/completions · GLM-5-3</span><span class="ms">1.8s</span></div>
+      <div class="row"><span>15:41:48</span><span class="s ok">200</span><span>POST /v1/chat/completions · Kimi-K3</span><span class="ms">2.4s</span></div>
+      <div class="row"><span>15:41:02</span><span class="s err">502</span><span>上游瞬时故障 → 自动重试成功</span><span class="ms">0.8s</span></div>
+      <div class="row"><span>15:40:55</span><span class="s ok">200</span><span>GET /v1/models</span><span class="ms">31ms</span></div>
+      <div class="row"><span>15:40:12</span><span class="s ok">200</span><span>GET /health</span><span class="ms">9ms</span></div>
+      <div class="row"><span>15:39:58</span><span class="s ok">200</span><span>POST /v1/chat/completions · Kimi-K3</span><span class="ms">1.1s</span></div>
+    </section>
+  </main>
+</div>
+</body>
+</html>

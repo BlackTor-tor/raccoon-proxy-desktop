@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>方向二 · 终端控制台</title>
+<style>
+/* 终端控制台 — 网关的"账房"隐喻(Operate 数据派)
+ * 暖炭底(避开 GitHub 蓝黑 slop),绿色只花在数据与状态;日志是 hero;
+ * 字阶 12/13/15/19/27;字重三档;等宽只用于机器值。 */
+:root {
+  --bg: #1e1d1b; --panel: #26241f; --panel-2: #2c2a24; --line: #3a382f; --line-2: #4a4739;
+  --ink: #ece9df; --ink-2: #b5b1a3; --ink-3: #83806f;
+  --green: #6db884; --green-dim: #3d5c47; --amber: #d0a75e; --red: #d98d85;
+  --sans: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", Consolas, ui-monospace, monospace;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--ink); font: 13px/1.65 var(--sans); -webkit-font-smoothing: antialiased; }
+button { font: inherit; cursor: pointer; border: 0; background: none; color: inherit; }
+
+/* 顶部命令条 */
+.topbar { height: 56px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 24px; padding: 0 32px; }
+.topbar .brand { display: flex; align-items: center; gap: 12px; font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+.topbar .brand svg { width: 28px; height: 28px; border-radius: 7px; }
+.topbar nav { display: flex; gap: 4px; margin-left: 16px; }
+.topbar nav button { padding: 8px 14px; border-radius: 7px; color: var(--ink-3); font-size: 13px; }
+.topbar nav button:hover { color: var(--ink); background: var(--panel); }
+.topbar nav button.active { color: var(--ink); background: var(--panel); box-shadow: inset 0 0 0 1px var(--line-2); }
+.topbar .state { margin-left: auto; display: flex; align-items: center; gap: 10px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.topbar .state .led { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px rgba(109,184,132,.15); }
+.topbar .state b { color: var(--green); font-weight: 500; }
+
+.wrap { display: grid; grid-template-columns: 384px minmax(0, 1fr); gap: 32px; padding: 32px; height: calc(100vh - 56px); }
+
+/* 左列:状态大屏 */
+.left { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.hero-status { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 28px; }
+.hero-status .label { font-size: 12px; color: var(--ink-3); margin-bottom: 12px; display: flex; justify-content: space-between; }
+.hero-status .big { font-size: 27px; font-weight: 600; letter-spacing: -0.01em; color: var(--green); display: flex; align-items: baseline; gap: 12px; }
+.hero-status .big small { font-size: 13px; font-weight: 400; color: var(--ink-2); }
+.hero-status .facts { margin-top: 24px; display: grid; gap: 0; }
+.hero-status .facts .f { display: flex; justify-content: space-between; padding: 10px 0; border-top: 1px solid var(--line); font-size: 13px; }
+.hero-status .facts .f span:first-child { color: var(--ink-3); }
+.hero-status .facts .f span:last-child { font-family: var(--mono); font-size: 12px; color: var(--ink); }
+.connect { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 24px 28px; }
+.connect h2 { font-size: 12px; font-weight: 500; color: var(--ink-3); margin-bottom: 16px; }
+.connect .row { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.connect .row:first-of-type { border-top: 0; }
+.connect code { flex: 1; font-family: var(--mono); font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.connect button { font-size: 12px; color: var(--ink-3); border: 1px solid var(--line-2); border-radius: 6px; padding: 4px 10px; }
+.connect button:hover { color: var(--ink); border-color: var(--ink-3); }
+.master { display: flex; gap: 12px; }
+.master .stop { flex: 1; border: 1px solid var(--line-2); border-radius: 9px; padding: 12px; font-size: 13px; color: var(--ink-2); }
+.master .stop:hover { color: var(--red); border-color: var(--red); }
+.master .test { flex: 1; background: var(--green-dim); border-radius: 9px; padding: 12px; font-size: 13px; color: var(--ink); }
+.master .test:hover { background: #476c52; }
+
+/* 右列:日志 hero + 模型条 */
+.right { display: flex; flex-direction: column; gap: 24px; min-width: 0; }
+.terminal { flex: 1; border: 1px solid var(--line); border-radius: 12px; background: #161512; display: flex; flex-direction: column; min-height: 0; overflow: hidden; }
+.terminal .bar { display: flex; align-items: center; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.terminal .bar h2 { font-size: 13px; font-weight: 500; }
+.terminal .bar span { font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.terminal .stream { flex: 1; overflow: auto; padding: 18px 20px; font-family: var(--mono); font-size: 12px; line-height: 2.05; }
+.logline { display: grid; grid-template-columns: 64px 40px 92px 1fr 64px; gap: 14px; align-items: baseline; }
+.logline .t { color: var(--ink-3); }
+.logline .s { text-align: right; }
+.logline .s.ok { color: var(--green); }
+.logline .s.err { color: var(--red); }
+.logline .m { color: var(--ink-2); }
+.logline .model { color: var(--amber); }
+.logline .ms { text-align: right; color: var(--ink-3); }
+.models-strip { border: 1px solid var(--line); border-radius: 12px; background: var(--panel); padding: 18px 20px; }
+.models-strip h2 { font-size: 12px; font-weight: 500; color: var(--ink-3); margin-bottom: 12px; display: flex; justify-content: space-between; }
+.models-strip .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { border: 1px solid var(--line-2); border-radius: 7px; padding: 7px 12px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); }
+.chip:hover { color: var(--ink); border-color: var(--ink-3); }
+.chip.lite { color: var(--green); border-color: var(--green-dim); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><svg viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#6db884"/><path d="M55 111 45 55Q44 43 57 48l50 27m42 0 50-27q13-5 12 7l-10 56" fill="#161512"/><path d="M128 66c-46 0-82 30-87 72-3 28 29 62 87 80 58-18 90-52 87-80-5-42-41-72-87-72Z" fill="#ece9df"/><path d="M48 125c17-15 35-20 52-11l28 20 28-20c17-9 35-4 52 11l-8 35-46 15-26-26-26 26-46-15Z" fill="#161512"/><ellipse cx="88" cy="140" rx="10" ry="12" fill="#161512"/><ellipse cx="168" cy="140" rx="10" ry="12" fill="#161512"/><path d="M109 170q19-13 38 0-2 16-19 22-17-6-19-22Z" fill="#161512"/></svg>RaccoonProxy</div>
+  <nav>
+    <button class="active">仪表盘</button>
+    <button>对话调试</button>
+    <button>设置</button>
+  </nav>
+  <div class="state"><span class="led"></span>gateway <b>running</b> · 127.0.0.1:8317</div>
+</header>
+<div class="wrap">
+  <div class="left">
+    <section class="hero-status">
+      <div class="label"><span>网关状态</span><span>检测于 15:42</span></div>
+      <div class="big">运行中<small>上游正常 · token 30 天后到期</small></div>
+      <div class="facts">
+        <div class="f"><span>监听地址</span><span>127.0.0.1:8317</span></div>
+        <div class="f"><span>今日请求</span><span>128 次 · 0 失败</span></div>
+        <div class="f"><span>平均延迟</span><span>1.24 s</span></div>
+        <div class="f"><span>可用模型</span><span>7 个</span></div>
+      </div>
+    </section>
+    <section class="connect">
+      <h2>接入信息</h2>
+      <div class="row"><code>http://127.0.0.1:8317/v1</code><button>复制</button></div>
+      <div class="row"><code>api key:未设置(任意值可用)</code><button>复制</button></div>
+    </section>
+    <div class="master">
+      <button class="stop">停止服务</button>
+      <button class="test">打开 Playground</button>
+    </div>
+  </div>
+  <div class="right">
+    <section class="terminal">
+      <div class="bar"><h2>请求日志</h2><span>streaming · last 200 lines</span></div>
+      <div class="stream">
+        <div class="logline"><span class="t">15:42:11</span><span class="s ok">200</span><span class="m">POST /v1/chat/completions</span><span><span class="model">GLM-5-3</span></span><span class="ms">1.8s</span></div>
+        <div class="logline"><span class="t">15:41:48</span><span class="s ok">200</span><span class="m">POST /v1/chat/completions</span><span><span class="model">Kimi-K3</span></span><span class="ms">2.4s</span></div>
+        <div class="logline"><span class="t">15:41:02</span><span class="s err">502</span><span class="m">上游瞬时故障 → 自动重试成功</span><span></span><span class="ms">0.8s</span></div>
+        <div class="logline"><span class="t">15:40:55</span><span class="s ok">200</span><span class="m">GET /v1/models</span><span></span><span class="ms">31ms</span></div>
+        <div class="logline"><span class="t">15:40:12</span><span class="s ok">200</span><span class="m">GET /health</span><span></span><span class="ms">9ms</span></div>
+        <div class="logline"><span class="t">15:39:58</span><span class="s ok">200</span><span class="m">POST /v1/chat/completions</span><span><span class="model">Kimi-K3</span></span><span class="ms">1.1s</span></div>
+        <div class="logline"><span class="t">15:38:20</span><span class="s ok">200</span><span class="m">GET /health</span><span></span><span class="ms">8ms</span></div>
+        <div class="logline"><span class="t">15:37:44</span><span class="s ok">200</span><span class="m">POST /v1/chat/completions</span><span><span class="model">SenseNova-6.8-Flash</span></span><span class="ms">0.6s</span></div>
+      </div>
+    </section>
+    <section class="models-strip">
+      <h2><span>可用模型</span><span>来自上游实时目录</span></h2>
+      <div class="chips">
+        <button class="chip">GLM-5-3</button>
+        <button class="chip">Kimi-K3</button>
+        <button class="chip">DeepSeek-V4.1-Flash</button>
+        <button class="chip lite">SenseNova-6.8-Flash</button>
+        <button class="chip lite">SenseNova-6.8-Flash-Lite</button>
+        <button class="chip">GLM-5-3-Flash</button>
+        <button class="chip">DeepSeek-V4.1-Flash-1017</button>
+      </div>
+    </section>
+  </div>
+</div>
+</body>
+</html>

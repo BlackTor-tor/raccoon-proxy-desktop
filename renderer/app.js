@@ -72,13 +72,13 @@ function setTheme(theme) {
 /* ---------- 日志 ---------- */
 
 function addLog(message, level = 'info') {
-  const lines = $('log-lines'); const cursor = lines.querySelector('.log-cursor'); if (cursor) cursor.remove();
+  const lines = $('log-lines');
   const empty = lines.querySelector('.log-empty'); if (empty) empty.remove();
-  const row = document.createElement('div'); row.className = 'log-line';
+  const row = document.createElement('div'); row.className = 'log-row';
   const values = [new Date().toLocaleTimeString('zh-CN', { hour12: false }), { info: '信息', error: '错误', warn: '提示' }[level] || '信息', String(message)];
-  ['log-time', 'log-level ' + level, 'log-message'].forEach((cls, i) => { const span = document.createElement('span'); span.className = cls; span.textContent = values[i]; row.appendChild(span); });
+  ['t', 'lv' + (level === 'error' ? ' err' : level === 'warn' ? ' warn' : ''), 'm'].forEach((cls, i) => { const span = document.createElement('span'); span.className = cls; span.textContent = values[i]; row.appendChild(span); });
   lines.appendChild(row); state.logCount++; while (lines.children.length > 150) lines.firstElementChild.remove();
-  $('log-count').textContent = `${state.logCount} 条日志 · 最多显示最近 150 条`; lines.scrollTop = lines.scrollHeight;
+  $('log-count').textContent = `${state.logCount} 条`; lines.scrollTop = lines.scrollHeight;
 }
 
 /* ---------- 仪表盘 ---------- */
@@ -86,20 +86,16 @@ function addLog(message, level = 'info') {
 function updateService() {
   $('service-toggle').setAttribute('aria-checked', String(state.running)); $('service-toggle').disabled = state.busy;
   $('service-title').textContent = state.busy ? (state.running ? '正在停止服务…' : '正在启动服务…') : state.running ? '服务运行中' : '服务已停止';
-  $('service-toggle-label').textContent = state.busy ? '处理中' : state.running ? '运行中' : '已停止';
-  $('service-description').textContent = state.running ? '以 OpenAI 兼容格式，连接你的开发工具。' : '开启服务后，即可通过本地地址调用模型。';
-  $('sidebar-status').textContent = (nativeService ? '' : '演示') + (state.running ? '服务运行中' : '服务已停止');
-  $('sidebar-dot').classList.toggle('off', !state.running); $('service-dot').classList.toggle('off', !state.running);
-  $('power-tile').style.background = state.running ? 'var(--accent-soft)' : 'var(--subtle)';
-  $('power-tile').style.color = state.running ? 'var(--accent-ink)' : 'var(--muted)';
-  $('power-tile').style.borderColor = state.running ? 'var(--accent-border)' : 'var(--border)';
-  $('service-mode').textContent = nativeService ? '本机服务' : '演示状态';
-  $('listen-address').textContent = `http://127.0.0.1:${state.settings.port}`; $('base-url').textContent = baseUrl();
-  $('log-port').textContent = state.settings.port; $('chat-endpoint').textContent = `127.0.0.1:${state.settings.port} / v1/chat/completions`;
+  $('service-description').textContent = state.running ? '以 OpenAI 兼容格式,连接你的开发工具。' : '开启服务后,即可通过本地地址调用模型。';
+  $('sidebar-status').textContent = (nativeService ? '' : '演示') + (state.running ? '网关运行中' : '网关已停止');
+  document.body.dataset.run = state.running ? 'on' : 'off';
+  $('service-dot').classList.toggle('off', !state.running);
+  $('listen-address').textContent = `127.0.0.1:${state.settings.port}`; $('base-url').textContent = baseUrl();
+  $('log-port').textContent = state.settings.port; $('chat-endpoint').textContent = `127.0.0.1:${state.settings.port}/v1/chat/completions`;
   $('api-key-display').textContent = state.settings.apiKey ? (state.keyVisible ? state.settings.apiKey : '••••••••••••••••') : '未设置 · 无需鉴权';
   $('reveal-key').hidden = !state.settings.apiKey; $('copy-api-key').disabled = !state.settings.apiKey;
   $('copy-api-key').title = state.settings.apiKey ? '复制 API Key' : '尚未设置 API Key';
-  $('key-hint').textContent = state.settings.apiKey ? '仅用于本地网关鉴权，请妥善保管' : '若工具要求必填，可填入任意非空占位值';
+  $('key-hint').textContent = state.settings.apiKey ? '仅用于本地网关鉴权,请妥善保管' : '若工具要求必填,可填入任意非空占位值';
 }
 async function toggleService() {
   if (state.busy) return; if (state.sending) { toast('请先停止当前生成，再切换服务'); return; }
@@ -118,14 +114,26 @@ async function copy(text, label, button) {
 const DEFAULT_MODELS = [['SenseChat-5', '默认对话模型'], ['SenseChat-5-Vision', '视觉模型'], ['sensenova-u1-pro', 'U1 Pro'], ['sensenova-u1.5-lite', 'U1.5 Lite']];
 state.models = DEFAULT_MODELS.map(([id, note]) => ({ id, note }));
 function renderModels() {
-  const wrap = $('model-list'); if (!wrap) return;
-  wrap.replaceChildren();
+  const tbody = $('model-list'); if (!tbody) return;
+  tbody.replaceChildren();
   for (const m of state.models) {
-    const chip = document.createElement('button'); chip.type = 'button'; chip.className = 'model-chip';
-    chip.textContent = m.display || m.id;
-    chip.title = (m.note ? m.note + '\n' : '') + '模型 ID: ' + m.id + '\n点击复制模型 ID';
-    chip.addEventListener('click', () => copy(m.id, '模型 ID', chip));
-    wrap.appendChild(chip);
+    const tr = document.createElement('tr');
+    tr.title = '模型 ID: ' + m.id + '\n点击行尾按钮复制';
+    const name = document.createElement('td'); name.className = 'name'; name.textContent = m.display || m.id;
+    const note = document.createElement('td'); note.className = 'note'; note.textContent = m.note || '—';
+    const type = document.createElement('td');
+    const tag = document.createElement('span');
+    const lite = m.billing === 'lite';
+    tag.className = 'tag' + (lite ? ' lite' : '');
+    tag.textContent = lite ? '轻量' : '标准';
+    type.appendChild(tag);
+    const act = document.createElement('td'); act.style.textAlign = 'right';
+    const btn = document.createElement('button'); btn.type = 'button'; btn.className = 'rowcopy'; btn.title = '复制模型 ID'; btn.setAttribute('aria-label', '复制模型 ID ' + m.id);
+    btn.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg>';
+    btn.addEventListener('click', () => copy(m.id, '模型 ID'));
+    act.appendChild(btn);
+    tr.append(name, note, type, act);
+    tbody.appendChild(tr);
   }
   $('models-badge').textContent = state.models.length + ' 个可用';
 }
@@ -143,16 +151,15 @@ function applyUpstream(h) {
   }
   const el = $('token-expiry'); if (!el) return;
   const up = h.upstream || {};
-  const map = { ok: ['正常', 'var(--accent-ink)'], no_account: ['未配置账号', 'var(--danger)'], login_failed: ['登录失败', 'var(--danger)'], unreachable: ['上游不可达', 'var(--danger)'], error: ['异常', 'var(--danger)'], checking: ['检测中…', 'var(--muted)'] };
-  const [text, color] = map[up.state] || ['未知', 'var(--muted)'];
+  const map = { ok: ['正常', 'var(--green-ink)'], no_account: ['未配置账号', 'var(--red)'], login_failed: ['登录失败', 'var(--red)'], unreachable: ['上游不可达', 'var(--red)'], error: ['异常', 'var(--red)'], checking: ['检测中…', 'var(--ink-3)'] };
+  const [text, color] = map[up.state] || ['未知', 'var(--ink-3)'];
   let full = text;
   if (up.state === 'ok') {
     if (h.tokenExpiresAt && Number.isFinite(new Date(h.tokenExpiresAt).getTime())) {
       const days = Math.max(0, Math.round((new Date(h.tokenExpiresAt) - Date.now()) / 86400000));
-      full += ' · token 约 ' + days + ' 天后到期';
+      full += ',token 约 ' + days + ' 天后到期';
     }
-    if (up.modelCount) full += ' · ' + up.modelCount + ' 个模型';
-  } else if (up.error) full += '：' + String(up.error).slice(0, 60);
+  } else if (up.error) full += ':' + String(up.error).slice(0, 50);
   el.textContent = full; el.style.color = color;
 }
 
@@ -339,7 +346,7 @@ $('service-toggle').addEventListener('click', toggleService);
 $('copy-base-url').addEventListener('click', () => copy(baseUrl(), ' Base URL', $('copy-base-url')));
 $('copy-api-key').addEventListener('click', () => { if (state.settings.apiKey) copy(state.settings.apiKey, ' API Key', $('copy-api-key')); });
 $('reveal-key').addEventListener('click', () => { state.keyVisible = !state.keyVisible; $('reveal-key').setAttribute('aria-label', state.keyVisible ? '隐藏 API Key' : '显示 API Key'); $('reveal-key').title = state.keyVisible ? '隐藏 API Key' : '显示 API Key'; updateService(); });
-$('clear-logs').addEventListener('click', () => { $('log-lines').replaceChildren(); const empty = document.createElement('div'); empty.className = 'log-empty'; empty.style.color = 'var(--terminal-muted)'; empty.textContent = '日志已清空，等待新的请求…'; $('log-lines').appendChild(empty); state.logCount = 0; $('log-count').textContent = '0 条日志'; toast('日志已清空'); });
+$('clear-logs').addEventListener('click', () => { $('log-lines').replaceChildren(); const empty = document.createElement('div'); empty.className = 'log-empty'; empty.textContent = '日志已清空,等待新的请求…'; $('log-lines').appendChild(empty); state.logCount = 0; $('log-count').textContent = '0 条'; toast('日志已清空'); });
 $('auto-start').addEventListener('click', () => { state.autoStartDraft = !state.autoStartDraft; $('auto-start').setAttribute('aria-checked', String(state.autoStartDraft)); });
 $('settings-form').addEventListener('submit', saveSettings);
 $('settings-form').addEventListener('input', () => $('save-result').hidden = true);
@@ -354,7 +361,7 @@ window.addEventListener('pagehide', () => state.controller?.abort());
 setTheme(state.theme); populateSettings(); updateService(); renderModels(); renderHistory(); navigate(storage.get('page', 'dashboard'));
 if (nativeService) {
   $('service-toggle').disabled = true;
-  bridge.getStatus().then(status => { state.running = status.running === true; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) document.querySelector('.version span').textContent = 'v' + status.version; $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
+  bridge.getStatus().then(status => { state.running = status.running === true; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) document.querySelector('.rail-version').textContent = 'v' + status.version; $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
   if (typeof bridge.onLog === 'function') bridge.onLog(entry => addLog(String(entry.message || ''), entry.level || 'info'));
   if (typeof bridge.onState === 'function') bridge.onState(st => { if (st.state === 'error' && st.error) addLog(st.error, 'error'); if (state.busy) return; const running = st.state === 'running'; if (state.running !== running) { state.running = running; updateService(); addLog(running ? '服务已启动' : '服务已停止'); } });
   if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok) applyUpstream(h); });

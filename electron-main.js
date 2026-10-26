@@ -229,17 +229,25 @@ function createWindow() {
       win.hide();
     }
   });
-  // 供端到端自检:RACCOON_SHOT=路径 时启动 4 秒后截图
+  // 供端到端自检:RACCOON_SHOT=<前缀> 时启动 6 秒后连拍三页(重试直到拿到非空帧)
   if (process.env.RACCOON_SHOT) {
     setTimeout(async () => {
-      try {
-        const img = await win.webContents.capturePage();
-        fs.writeFileSync(process.env.RACCOON_SHOT, img.toPNG());
-        console.log(`[shot] ${process.env.RACCOON_SHOT}`);
-      } catch (e) {
-        console.error('[shot] failed', e.message);
-      }
-    }, 4000);
+      const prefix = process.env.RACCOON_SHOT;
+      const shot = async (name) => {
+        for (let i = 0; i < 10; i++) {
+          try {
+            const png = (await win.webContents.capturePage()).toPNG();
+            if (png.length > 8000) { fs.writeFileSync(prefix + name, png); console.log(`[shot] ${name} ${png.length}`); return; }
+          } catch {}
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        console.log(`[shot] FAILED ${name}`);
+      };
+      const go = async (page) => { try { await win.webContents.executeJavaScript(`document.querySelector('[data-page="${page}"]').click(); new Promise(r=>setTimeout(r,500))`); } catch {} await new Promise((r) => setTimeout(r, 700)); };
+      await go('dashboard'); await shot('dashboard.png');
+      await go('settings'); await shot('settings.png');
+      await go('playground'); await shot('playground.png');
+    }, 6000);
   }
 }
 
