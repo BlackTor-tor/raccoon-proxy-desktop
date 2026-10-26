@@ -180,6 +180,15 @@ table.models .num { font-variant-numeric: tabular-nums; }
 .bubble.error { color: var(--red); background: var(--red-soft); }
 .bubble.streaming::after { content: ""; display: inline-block; width: 5px; height: 12px; margin-left: 4px; background: currentColor; animation: blink 1s steps(2, start) infinite; }
 .message-note { font-size: 11px; color: var(--ink-3); margin-top: 4px; }
+
+/* 思维链(折叠) */
+.bubble .thought { margin-bottom: 8px; border-radius: 6px; background: var(--bg); border: 1px solid var(--line); font-size: 12px; color: var(--ink-2); }
+.bubble .thought summary { cursor: pointer; padding: 6px 10px; color: var(--ink-3); font-size: 12px; list-style: none; display: flex; align-items: center; gap: 6px; user-select: none; }
+.bubble .thought summary::-webkit-details-marker { display: none; }
+.bubble .thought summary::before { content: "▸"; font-size: 9px; transition: transform .15s; }
+.bubble .thought[open] summary::before { transform: rotate(90deg); }
+.bubble .thought-body { padding: 2px 10px 8px; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; max-height: 240px; overflow-y: auto; }
+.user .bubble .thought { display: none; }
 .message-note .text-button { margin-top: 2px; }
 .text-button { padding: 2px 0; border: 0; background: transparent; font-size: 12px; color: var(--ink-2); text-decoration: underline; text-decoration-color: var(--line-2); text-underline-offset: 3px; }
 .text-button:hover { color: var(--ink); }

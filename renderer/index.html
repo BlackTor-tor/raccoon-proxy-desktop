@@ -170,6 +170,16 @@
               <label for="chat-model">模型</label>
               <select id="chat-model" class="mono"></select>
             </div>
+            <div class="field inline">
+              <label for="chat-effort">思考程度</label>
+              <select id="chat-effort">
+                <option value="">默认</option>
+                <option value="off">关闭</option>
+                <option value="low">低</option>
+                <option value="medium">中</option>
+                <option value="high">高</option>
+              </select>
+            </div>
             <div class="field inline grow">
               <label for="system-prompt">系统提示词(可选)</label>
               <input id="system-prompt" type="text" placeholder="例如:请用简洁清晰的中文回答。">
