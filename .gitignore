@@ -5,3 +5,9 @@ dist/
 .env
 *.local
 shot*.png
+repo.json
+resp.json
+release.json
+release-resp.json
+up1.json
+up2.json

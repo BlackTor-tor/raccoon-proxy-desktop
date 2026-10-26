@@ -285,7 +285,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
         <section class="card service-card" data-od-id="service-card" aria-labelledby="service-heading">
           <div class="section-eyebrow" id="service-heading">代理服务 <span class="badge" id="service-mode">演示状态</span></div>
           <div class="service-main"><div class="service-state"><div class="power-tile" id="power-tile"><svg class="icon" aria-hidden="true"><use href="#i-power"/></svg></div><div><h2 id="service-title" data-od-id="service-status" aria-live="polite">服务运行中</h2><p id="service-description">以 OpenAI 兼容格式，连接你的开发工具。</p></div></div><div class="service-toggle-wrap"><span class="toggle-label" id="service-toggle-label">运行中</span><button type="button" role="switch" aria-checked="true" aria-label="开启或停止代理服务" class="switch large" id="service-toggle" data-od-id="service-toggle"></button></div></div>
-          <div class="service-details"><div class="detail"><div class="detail-label">监听地址</div><div class="detail-value"><span class="dot" id="service-dot"></span><code id="listen-address">http://127.0.0.1:8317</code><span class="badge">本地</span></div></div><div class="detail"><div class="detail-label">上游令牌有效期</div><div class="detail-value"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><span id="token-expiry">待验证</span><button type="button" class="text-button" data-go="settings" data-od-id="configure-account">配置账户</button></div></div></div>
+          <div class="service-details"><div class="detail"><div class="detail-label">监听地址</div><div class="detail-value"><span class="dot" id="service-dot"></span><code id="listen-address">http://127.0.0.1:8317</code><span class="badge">本地</span></div></div><div class="detail"><div class="detail-label">上游状态</div><div class="detail-value"><svg class="icon" aria-hidden="true"><use href="#i-clock"/></svg><span id="token-expiry">待验证</span><button type="button" class="text-button" data-go="settings" data-od-id="configure-account">配置账户</button></div></div></div>
         </section>
         <section class="card connection-card" aria-labelledby="connection-title" data-od-id="connection-card">
           <div class="section-header"><h2 id="connection-title" data-od-id="connection-title">接入信息</h2><span class="section-note">复制后填入开发工具的 API 配置</span></div>
@@ -293,7 +293,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
         </section>
         <div class="bottom-grid">
           <section class="terminal-card" aria-labelledby="logs-title" data-od-id="request-logs"><div class="terminal-header"><h2 class="terminal-title" id="logs-title" data-od-id="logs-title"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg>实时请求日志</h2><div class="terminal-actions"><span class="live-label"><span class="dot"></span>实时</span><button type="button" id="clear-logs" data-od-id="clear-logs"><svg class="icon" aria-hidden="true"><use href="#i-trash"/></svg>清空</button></div></div><div class="log-lines" id="log-lines" role="log" aria-label="请求日志" aria-live="polite"><div class="log-line"><span class="log-time">示例</span><span class="log-level">信息</span><span class="log-message">RaccoonProxy 本地网关已就绪</span></div><div class="log-line"><span class="log-time">示例</span><span class="log-level">信息</span><span class="log-message">监听 http://127.0.0.1:8317</span></div><div class="log-line"><span class="log-time">示例</span><span class="log-level">信息</span><span class="log-message">已加载 4 个预设模型</span></div><div class="log-line"><span class="log-time">示例</span><span class="log-level">信息</span><span class="log-message">等待 /v1/chat/completions 请求…</span></div><span class="log-cursor" aria-hidden="true"></span></div><div class="terminal-footer"><span id="log-count">4 条示例 · 新请求将显示真实日志</span><span class="mono">127.0.0.1:<span id="log-port">8317</span></span></div></section>
-          <section class="card models-card" aria-labelledby="models-title" data-od-id="models-card"><div class="section-header"><h2 id="models-title" data-od-id="models-title">可用模型</h2><span class="badge">4 个预设</span></div><p class="section-note">点击模型名称，即可复制</p><div class="model-list"><button type="button" class="model-chip" data-model="SenseChat-5" data-od-id="model-sensechat-5">SenseChat-5<svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></button><button type="button" class="model-chip" data-model="SenseChat-5-Vision" data-od-id="model-sensechat-5-vision">SenseChat-5-Vision<svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></button><button type="button" class="model-chip" data-model="sensenova-u1-pro" data-od-id="model-u1-pro">sensenova-u1-pro<svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></button><button type="button" class="model-chip" data-model="sensenova-u1.5-lite" data-od-id="model-u1-5-lite">sensenova-u1.5-lite<svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg></button></div><div class="models-footer"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>实际可用性取决于账户权限</div></section>
+          <section class="card models-card" aria-labelledby="models-title" data-od-id="models-card"><div class="section-header"><h2 id="models-title" data-od-id="models-title">可用模型</h2><span class="badge" id="models-badge">加载中…</span></div><p class="section-note">点击模型名称，即可复制</p><div class="model-list" id="model-list"></div><div class="models-footer"><svg class="icon" aria-hidden="true"><use href="#i-info"/></svg>来自上游实时目录，实际可用性取决于账户权限</div></section>
         </div>
         <footer class="page-footer"><span class="footer-note"><svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>服务仅监听 127.0.0.1，不向局域网开放</span><span>本地连接，让工作流更直接。</span></footer>
       </section>
@@ -371,6 +371,49 @@ function updateService() {
   $('reveal-key').hidden = !state.settings.apiKey; $('copy-api-key').disabled = !state.settings.apiKey;
   $('copy-api-key').title = state.settings.apiKey ? '复制 API Key' : '尚未设置 API Key';
   $('key-hint').textContent = state.settings.apiKey ? '仅用于本地网关鉴权，请妥善保管' : '若工具要求必填，可填入任意非空占位值';
+}
+// ---- 上游目录与状态(bridge 数据到达前用兜底列表) ----
+const DEFAULT_MODELS = [['SenseChat-5', '默认对话模型'], ['SenseChat-5-Vision', '视觉模型'], ['sensenova-u1-pro', 'U1 Pro'], ['sensenova-u1.5-lite', 'U1.5 Lite']];
+state.models = DEFAULT_MODELS.map(([id, note]) => ({ id, note }));
+function renderModels() {
+  const wrap = document.getElementById('model-list'); if (!wrap) return;
+  wrap.replaceChildren();
+  for (const m of state.models) {
+    const chip = document.createElement('button'); chip.type = 'button'; chip.className = 'model-chip';
+    const label = m.display || m.id;
+    chip.textContent = label;
+    chip.title = (m.note ? m.note + '\n' : '') + '模型 ID: ' + m.id + '\n点击复制模型 ID';
+    chip.addEventListener('click', () => copy(m.id, '模型 ID', chip));
+    wrap.appendChild(chip);
+  }
+  const badge = document.getElementById('models-badge');
+  if (badge) badge.textContent = state.models.length + ' 个可用';
+}
+function applyUpstream(h) {
+  if (!h) return;
+  const models = Array.isArray(h.models) ? h.models : null;
+  if (models && models.length) {
+    state.models = models.map((m) => (typeof m === 'string' ? { id: m } : { id: m.id, display: m.display, note: m.note, billing: m.billing, visible: m.visible }));
+    renderModels();
+    const sel = $('chat-model'); const prev = sel.value;
+    sel.replaceChildren();
+    for (const m of state.models) { const opt = document.createElement('option'); opt.value = m.id; opt.textContent = m.display || m.id; sel.appendChild(opt); }
+    if (prev && state.models.some((m) => m.id === prev)) sel.value = prev;
+    else if (h.defaultModel && state.models.some((m) => m.id === h.defaultModel)) sel.value = h.defaultModel;
+  }
+  const el = $('token-expiry'); if (!el) return;
+  const up = h.upstream || {};
+  const map = { ok: ['正常', 'var(--accent-ink)'], no_account: ['未配置账号', 'var(--danger)'], login_failed: ['登录失败', 'var(--danger)'], unreachable: ['上游不可达', 'var(--danger)'], error: ['异常', 'var(--danger)'], checking: ['检测中…', 'var(--muted)'] };
+  const [text, color] = map[up.state] || ['未知', 'var(--muted)'];
+  let full = text;
+  if (up.state === 'ok') {
+    if (h.tokenExpiresAt && Number.isFinite(new Date(h.tokenExpiresAt).getTime())) {
+      const days = Math.max(0, Math.round((new Date(h.tokenExpiresAt) - Date.now()) / 86400000));
+      full += ' · token 约 ' + days + ' 天后到期';
+    }
+    if (up.modelCount) full += ' · ' + up.modelCount + ' 个模型';
+  } else if (up.error) full += '：' + String(up.error).slice(0, 60);
+  el.textContent = full; el.style.color = color;
 }
 async function toggleService() {
   if (state.busy) return; if (state.sending) { toast('请先停止当前生成，再切换服务'); return; }
@@ -484,13 +527,13 @@ $('chat-input').addEventListener('keydown', event => { if (event.key === 'Enter'
 $('chat-input').addEventListener('input', () => { $('chat-input').style.height = '42px'; $('chat-input').style.height = Math.min($('chat-input').scrollHeight, 140) + 'px'; });
 $('new-chat').addEventListener('click', () => { if (state.sending) return; state.messages = []; resetConversation(); toast('已开始新的对话'); });
 window.addEventListener('pagehide', () => state.controller?.abort());
-setTheme(state.theme); populateSettings(); updateService(); navigate(storage.get('page', 'dashboard'));
+setTheme(state.theme); populateSettings(); updateService(); renderModels(); navigate(storage.get('page', 'dashboard'));
 if (nativeService) {
   $('service-toggle').disabled = true;
-  bridge.getStatus().then(status => { state.running = status.running === true; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) document.querySelector('.version span').textContent = 'v' + status.version; if (status.tokenExpiresAt && Number.isFinite(new Date(status.tokenExpiresAt).getTime())) $('token-expiry').textContent = new Date(status.tokenExpiresAt).toLocaleString('zh-CN', { hour12: false }); $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
+  bridge.getStatus().then(status => { state.running = status.running === true; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) document.querySelector('.version span').textContent = 'v' + status.version; if (status.tokenExpiresAt && Number.isFinite(new Date(status.tokenExpiresAt).getTime())) $('token-expiry').textContent = new Date(status.tokenExpiresAt).toLocaleString('zh-CN', { hour12: false }); $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
   if (typeof bridge.onLog === 'function') bridge.onLog(entry => addLog(String(entry.message || ''), entry.level || 'info'));
   if (typeof bridge.onState === 'function') bridge.onState(st => { if (st.state === 'error' && st.error) addLog(st.error, 'error'); if (state.busy) return; const running = st.state === 'running'; if (state.running !== running) { state.running = running; updateService(); addLog(running ? '服务已启动' : '服务已停止'); } });
-  if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok && h.tokenExpiresAt && Number.isFinite(new Date(h.tokenExpiresAt).getTime())) $('token-expiry').textContent = new Date(h.tokenExpiresAt).toLocaleString('zh-CN', { hour12: false }); });
+  if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok) applyUpstream(h); });
   $('credentials-note').textContent = '账户凭据交由桌面应用处理；主题、端口与启动偏好保存在本机。';
 } else if (state.settings.autoStart) addLog('演示：已按启动偏好开启服务');
 </script>

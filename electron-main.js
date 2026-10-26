@@ -28,6 +28,8 @@ let logBuf = [];
 let settings = null;
 let healthTimer = null;
 let lastTokenExp = null;
+let lastUpstream = null;
+let lastModels = null;
 
 function settingsFile() {
   return path.join(app.getPath('userData'), 'settings.json');
@@ -100,6 +102,8 @@ function startProxy() {
     child = null;
     stopHealthPoll();
     lastTokenExp = null;
+    lastUpstream = null;
+    lastModels = null;
     const graceful = code === 0 || signal === 'SIGTERM';
     setState(
       graceful ? 'stopped' : 'error',
@@ -151,8 +155,10 @@ function healthCheck() {
       try {
         const json = JSON.parse(body);
         lastTokenExp = json.token_exp || lastTokenExp;
+        lastUpstream = json.upstream || lastUpstream;
+        lastModels = json.models || lastModels;
         if (state === 'starting') setState('running');
-        send('proxy:health', { ok: true, tokenExpiresAt: lastTokenExp });
+        send('proxy:health', { ok: true, tokenExpiresAt: lastTokenExp, upstream: json.upstream, models: json.models, defaultModel: json.default_model });
       } catch {
         send('proxy:health', { ok: false });
       }
@@ -273,7 +279,8 @@ ipcMain.handle('app:status', () => ({
   error: lastError,
   port: settings.port,
   tokenExpiresAt: lastTokenExp,
-  settings,
+  upstream: lastUpstream,
+  models: lastModels,
   version: app.getVersion(),
   logs: logBuf,
 }));
