@@ -3,7 +3,8 @@ const { app, BrowserWindow } = require('electron');
 const http = require('http');
 const path = require('path');
 
-// ---- mock 网关:SSE 流式回 "收到" ----
+// ---- mock 网关:SSE 先发思维链再发答案,记录 reasoning_effort ----
+let lastBody = null;
 const upstream = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -13,11 +14,17 @@ const upstream = http.createServer((req, res) => {
     res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' });
     return res.end();
   }
-  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
-  const frame = (s) => `data: ${JSON.stringify({ choices: [{ delta: { content: s } }] })}\n\n`;
-  res.write(frame(''));
-  setTimeout(() => res.write(frame('收到')), 150);
-  setTimeout(() => { res.write(frame('!')); res.write('data: [DONE]\n\n'); res.end(); }, 400);
+  let body = '';
+  req.on('data', (c) => body += c);
+  req.on('end', () => {
+    try { lastBody = JSON.parse(body); } catch {}
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store' });
+    const frame = (extra) => `data: ${JSON.stringify({ choices: [{ delta: extra }] })}\n\n`;
+    res.write(frame({}));
+    setTimeout(() => res.write(frame({ reasoning_content: '思考中' })), 100);
+    setTimeout(() => res.write(frame({ content: '收到' })), 250);
+    setTimeout(() => { res.write(frame({ content: '!' })); res.write('data: [DONE]\n\n'); res.end(); }, 450);
+  });
 });
 
 app.whenReady().then(async () => {
@@ -51,23 +58,28 @@ app.whenReady().then(async () => {
   assert('导航切换:点击仪表盘后仅仪表盘可见', navBefore.afterDashboard.dashboard !== 'none' && navBefore.afterDashboard.settings === 'none', navBefore.afterDashboard);
   assert('页面不叠放(无双滚动条根因)', navBefore.bodyRatio <= 1.05, navBefore.bodyRatio);
 
-  // 1) 切到对话调试页(真实用户路径),发送消息(mock 网关秒回)
-  await run(`(async () => { document.querySelector('[data-page="playground"]').click(); await new Promise(r => setTimeout(r, 300)); })()`);
+  // 1) 切到对话调试页(真实用户路径),选思考程度=低,发送消息(mock 网关秒回)
+  await run(`(async () => { document.querySelector('[data-page="playground"]').click(); await new Promise(r => setTimeout(r, 300)); document.getElementById('chat-effort').value = 'low'; })()`);
   const afterSend = await run(`(async () => {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     document.getElementById('chat-input').value = '只回复两个字:收到';
     document.getElementById('chat-form').requestSubmit();
     for (let i = 0; i < 40; i++) { await sleep(500); if (document.querySelector('.message-note') || document.querySelector('.message .text-button')) break; }
+    const thought = document.querySelector('.message.assistant .thought');
     return {
       messages: document.querySelectorAll('.message').length,
       historyItems: document.querySelectorAll('.history-item').length,
       stored: JSON.parse(localStorage.getItem('raccoonproxy.conversations') || '[]').length,
-      bubble: (document.querySelectorAll('.message .bubble')[1] || {}).textContent || '',
+      answer: (document.querySelector('.message.assistant .answer') || {}).textContent || '',
+      thoughtVisible: !!thought && !thought.hidden,
+      thoughtText: (document.querySelector('.message.assistant .thought-body') || {}).textContent || '',
       title: (document.querySelector('.history-item-title') || {}).textContent || '',
     };
   })()`);
   assert('发送后产生对话与历史记录', afterSend.messages >= 2 && afterSend.historyItems === 1 && afterSend.stored === 1, afterSend);
-  assert('助手有真实回复', afterSend.bubble.trim().length > 0, afterSend.bubble.slice(0, 40));
+  assert('助手有真实回复', afterSend.answer.includes('收到'), afterSend.answer.slice(0, 40));
+  assert('思维链已渲染(可折叠)', afterSend.thoughtVisible && afterSend.thoughtText.includes('思考中'), { visible: afterSend.thoughtVisible, text: afterSend.thoughtText });
+  assert('reasoning_effort 已随请求发送', lastBody && lastBody.reasoning_effort === 'low', lastBody && lastBody.reasoning_effort);
   assert('历史标题取自首条消息', afterSend.title.includes('收到') || afterSend.title.length > 0, afterSend.title);
 
   // 2) 新对话:消息清空,历史保留
