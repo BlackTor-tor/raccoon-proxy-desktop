@@ -12,7 +12,7 @@
 - **上游状态监测**:仪表盘实时显示上游/账号状态(每分钟探测、5 分钟全量刷新),token 失效自动重登,登录失败/上游不可达即时提示
 - **自动登录**:账号只填一次,token 自动缓存与续期(30 天有效),失效自动重登
 - **实时日志**:请求状态、耗时、上游错误实时可见
-- **Playground**:内置对话测试,流式输出,装完即可自检
+- **Playground**:内置对话测试,流式输出,装完即可自检;**历史对话**子菜单自动保存最近 50 段对话(本地存储),可一键恢复、删除(支持撤销)
 - **本地鉴权(可选)**:给本地端口加一道 Bearer API Key
 
 ## 快速开始
@@ -63,7 +63,7 @@ XHX_PHONE=... XHX_PASSWORD=... node proxy/server.js   # 默认 http://127.0.0.1:
 
 - `electron-main.js` — Electron 主进程:窗口/托盘/子进程管理/设置持久化/IPC
 - `preload.js` — contextBridge,向渲染进程暴露最小 API
-- `renderer/` — 界面(仪表盘 / 设置 / Playground)
+- `renderer/` — 界面:`index.html`(结构)+ `styles.css`(Token 化样式)+ `app.js`(逻辑)
 - `proxy/server.js` — 网关服务进程(纯 Node 标准库,零依赖)
 - `assets/` — 图标与品牌资源
 
