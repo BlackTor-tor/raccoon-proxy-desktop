@@ -1,13 +1,17 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage } = require('electron');
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const { fork } = require('child_process');
+const { checkForUpdate, downloadFile, RELEASES_PAGE } = require('./updater');
 
 // 渲染进程桥接契约(window.raccoonProxy):
 //   getStatus() -> {running, port, tokenExpiresAt, settings, version}
 //   startService()/stopService() -> {ok, error?}
 //   saveSettings(value) -> {ok}   value={countryCode, phone, password, port, apiKey, autoStart}
+//   checkUpdate() -> {ok, updateAvailable, current, latest, downloadUrl, pageUrl}
+//   downloadUpdate({url, latest}) -> {ok, started}   进度经 onUpdateProgress 推送
+//   installUpdate() -> {ok} / openReleases() -> {ok}
 //   onLog(cb) cb({message, level}) / onState(cb) cb({state, error}) / onHealth(cb) cb({ok, tokenExpiresAt})
 const DEFAULTS = {
   phone: '',
@@ -311,5 +315,54 @@ ipcMain.handle('settings:save', (_e, v) => {
   };
   persistSettings();
   updateTray();
+  return { ok: true };
+});
+
+// ---- 软件更新:检查 / 下载(主进程网络,渲染进程无外网权限) / 安装 / 打开 Releases ----
+let updateDownloading = false;
+let updateFile = null;
+
+ipcMain.handle('update:check', async () => {
+  try {
+    const info = await checkForUpdate({ currentVersion: app.getVersion() });
+    return { ok: true, ...info };
+  } catch (e) {
+    return { ok: false, error: String((e && e.message) || e), pageUrl: RELEASES_PAGE };
+  }
+});
+
+ipcMain.handle('update:download', (_e, payload) => {
+  const url = payload && typeof payload.url === 'string' ? payload.url : '';
+  const latest = payload && typeof payload.latest === 'string' ? payload.latest.replace(/[^\w.-]/g, '') : '';
+  if (!/^https:\/\//i.test(url)) return { ok: false, error: '下载地址无效' };
+  if (updateDownloading) return { ok: false, error: '已有下载任务进行中' };
+  updateDownloading = true;
+  updateFile = null;
+  const destFile = path.join(app.getPath('temp'), `RaccoonProxy-Setup-${latest || 'latest'}.exe`);
+  send('update:progress', { status: 'downloading', received: 0, total: 0 });
+  downloadFile({ url, destFile, onProgress: (p) => send('update:progress', { status: 'downloading', ...p }) })
+    .then(() => {
+      updateFile = destFile;
+      send('update:progress', { status: 'ready', file: destFile, latest });
+    })
+    .catch((e) => {
+      send('update:progress', { status: 'failed', message: String((e && e.message) || e), pageUrl: RELEASES_PAGE });
+    })
+    .finally(() => {
+      updateDownloading = false;
+    });
+  return { ok: true, started: true };
+});
+
+ipcMain.handle('update:install', async () => {
+  if (!updateFile || !fs.existsSync(updateFile)) return { ok: false, error: '未找到已下载的安装包,请先下载更新' };
+  const err = await shell.openPath(updateFile);
+  if (err) return { ok: false, error: err };
+  setTimeout(() => app.quit(), 500); // 让安装器接管,退出本应用
+  return { ok: true };
+});
+
+ipcMain.handle('update:open-page', async () => {
+  await shell.openExternal(RELEASES_PAGE);
   return { ok: true };
 });

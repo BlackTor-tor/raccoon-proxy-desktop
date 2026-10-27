@@ -29,7 +29,7 @@ const upstream = http.createServer((req, res) => {
 
 app.whenReady().then(async () => {
   await new Promise((resolve) => upstream.listen(8318, '127.0.0.1', resolve));
-  const win = new BrowserWindow({ show: false, webPreferences: { offscreen: true } });
+  const win = new BrowserWindow({ show: false, width: 1180, height: 780, webPreferences: { offscreen: true } });
   await win.loadFile(path.join(__dirname, '..', 'renderer', 'index.html'));
   // 指向 mock 网关并清空历史,再重载生效
   await win.webContents.executeJavaScript(`localStorage.removeItem('raccoonproxy.conversations'); localStorage.setItem('raccoonproxy.preferences', JSON.stringify({ port: 8318 }))`).catch(() => {});
@@ -57,6 +57,55 @@ app.whenReady().then(async () => {
   assert('导航切换:点击设置后仅设置页可见', navBefore.afterSettings.dashboard === 'none' && navBefore.afterSettings.settings !== 'none', navBefore.afterSettings);
   assert('导航切换:点击仪表盘后仅仪表盘可见', navBefore.afterDashboard.dashboard !== 'none' && navBefore.afterDashboard.settings === 'none', navBefore.afterDashboard);
   assert('页面不叠放(无双滚动条根因)', navBefore.bodyRatio <= 1.05, navBefore.bodyRatio);
+
+  // 0.5) UI 优化回归:删「工作台」/「本地配置」文案、设置页滚动容器贴窗口右缘、图标非太阳误绘
+  const uiCopy = await run(`(async () => {
+    const texts = {};
+    for (const p of ['dashboard', 'settings', 'playground']) {
+      document.querySelector('[data-page="' + p + '"]').click();
+      await new Promise(r => setTimeout(r, 100));
+      texts[p] = document.body.textContent;
+    }
+    document.querySelector('[data-page="settings"]').click();
+    await new Promise(r => setTimeout(r, 100));
+    const scroller = document.querySelector('#page-settings .content');
+    return {
+      texts,
+      crumbCount: document.querySelectorAll('.crumb').length,
+      scrollerRight: Math.round(scroller.getBoundingClientRect().right),
+      winW: window.innerWidth,
+      bodyRatio: +(document.body.scrollHeight / window.innerHeight).toFixed(2),
+    };
+  })()`);
+  assert('所有页面不出现「工作台」文字', Object.values(uiCopy.texts).every(t => !t.includes('工作台')));
+  assert('设置页不出现「本地配置」文字', !uiCopy.texts.settings.includes('本地配置'));
+  assert('设置页滚动容器贴住窗口右缘(无悬空滚动条)', uiCopy.scrollerRight >= uiCopy.winW - 2, { scrollerRight: uiCopy.scrollerRight, winW: uiCopy.winW });
+  assert('设置页不撑破窗口滚动', uiCopy.bodyRatio <= 1.05, uiCopy.bodyRatio);
+  const iconState = await run(`({
+    settings: document.getElementById('i-settings').innerHTML,
+    sun: document.getElementById('i-sun').innerHTML,
+    dangling: [...document.querySelectorAll('use')].map(u => u.getAttribute('href')).filter(h => h && h.startsWith('#i-') && !document.getElementById(h.slice(1))),
+  })`);
+  assert('设置图标已换成齿轮(不再是太阳误绘)', iconState.settings.startsWith('<path d="M9.671 4.136') && iconState.settings.includes('<circle cx="12" cy="12" r="3">'), iconState.settings.slice(0, 80));
+  assert('所有图标引用均可解析(重做后无悬空 use)', iconState.dangling.length === 0, iconState.dangling);
+
+  // 0.6) 软件更新块:版本号 + 检查更新按钮;无桥接环境点击后优雅降级(不崩、给提示)
+  const updateBlock = await run(`(async () => {
+    const cur = document.getElementById('update-current');
+    const btn = document.getElementById('update-check');
+    if (!cur || !btn) return { present: false };
+    btn.click();
+    await new Promise(r => setTimeout(r, 300));
+    return {
+      present: true,
+      versionText: cur.textContent,
+      stateText: document.getElementById('update-state').textContent,
+      btnReEnabled: !btn.disabled,
+      fallbackShown: !document.getElementById('update-fallback').hidden,
+    };
+  })()`);
+  assert('设置页有版本号与检查更新按钮', updateBlock.present === true && /^(v)?\d+\.\d+\.\d+$|^—$/.test(updateBlock.versionText), updateBlock);
+  assert('无桥接时检查更新优雅降级并显示 Releases 链接', updateBlock.stateText.includes('无法') && updateBlock.btnReEnabled === true && updateBlock.fallbackShown === true, updateBlock);
 
   // 1) 切到对话调试页(真实用户路径),选思考程度=低,发送消息(mock 网关秒回)
   await run(`(async () => { document.querySelector('[data-page="playground"]').click(); await new Promise(r => setTimeout(r, 300)); document.getElementById('chat-effort').value = 'low'; })()`);

@@ -14,4 +14,11 @@ contextBridge.exposeInMainWorld('raccoonProxy', {
   onHealth: (cb) => {
     ipcRenderer.on('proxy:health', (_e, h) => cb(h));
   },
+  checkUpdate: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: (info) => ipcRenderer.invoke('update:download', info),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  openReleases: () => ipcRenderer.invoke('update:open-page'),
+  onUpdateProgress: (cb) => {
+    ipcRenderer.on('update:progress', (_e, p) => cb(p));
+  },
 });

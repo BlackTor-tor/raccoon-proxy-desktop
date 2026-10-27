@@ -1,0 +1,102 @@
+// updater.js 单元测试:纯 Node 运行(node scripts/update-test.js),内置 mock HTTP 服务器,离线确定性
+// 覆盖:版本比较 / 安装包挑选 / 检查更新 / 下载(重定向、瞬时失败重试、连续失败 3 次后兜底报错)
+const http = require('http');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const updater = require('../updater');
+
+let failed = false;
+const assert = (name, cond, extra) => {
+  console.log((cond ? 'PASS' : 'FAIL') + ' | ' + name + (extra !== undefined ? ' | ' + JSON.stringify(extra) : ''));
+  if (!cond) failed = true;
+};
+
+const RELEASE = {
+  tag_name: 'v1.5.0',
+  assets: [
+    { name: 'RaccoonProxy 1.5.0.exe', browser_download_url: 'http://127.0.0.1:0/portable.exe', size: 90 },
+    { name: 'RaccoonProxy Setup 1.5.0.exe.blockmap', browser_download_url: 'http://127.0.0.1:0/blockmap', size: 1 },
+    { name: 'RaccoonProxy Setup 1.5.0.exe', browser_download_url: 'http://127.0.0.1:0/setup.exe', size: 80 },
+    { name: 'latest.yml', browser_download_url: 'http://127.0.0.1:0/latest.yml', size: 1 },
+  ],
+};
+
+// 计数器在请求开始时自增;failTimes 次 500 后恢复 200
+function makeServer({ failTimes = 0, redirect = false } = {}) {
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    hits++;
+    if (req.url === '/releases/latest') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(RELEASE));
+    }
+    if (redirect && req.url === '/setup.exe') {
+      res.writeHead(302, { Location: 'http://127.0.0.1:' + server.address().port + '/real-file' });
+      return res.end();
+    }
+    if (hits <= failTimes && req.url !== '/hits') {
+      res.writeHead(500);
+      return res.end('boom');
+    }
+    res.writeHead(200, { 'Content-Type': 'application/octet-stream', 'Content-Length': 11 });
+    res.end('hello-patch');
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, hits: () => hits })));
+}
+
+(async () => {
+  // 1) 版本比较:数字逐段比较,不是字符串比较
+  assert('版本比较:新版本大于当前', updater.compareVersions('1.5.0', '1.4.1') === 1);
+  assert('版本比较:相同版本返回 0', updater.compareVersions('v1.4.1', '1.4.1') === 0);
+  assert('版本比较:逐段数字比较(1.10 > 1.9)', updater.compareVersions('1.10.0', '1.9.9') === 1);
+  assert('版本比较:旧版本返回 -1', updater.compareVersions('1.3.9', '1.4.0') === -1);
+
+  // 2) 安装包挑选:只选 NSIS Setup exe,忽略 portable/blockmap/yml
+  const asset = updater.pickSetupAsset(RELEASE);
+  assert('挑选 NSIS Setup 安装包', !!asset && asset.name === 'RaccoonProxy Setup 1.5.0.exe', asset && asset.name);
+  assert('无 Setup 包时返回 null', updater.pickSetupAsset({ assets: [{ name: 'latest.yml' }] }) === null);
+
+  // 3) 检查更新:有新版本
+  let s = await makeServer();
+  const base = 'http://127.0.0.1:' + s.server.address().port;
+  const info = await updater.checkForUpdate({ currentVersion: '1.4.1', apiUrl: base + '/releases/latest' });
+  assert('检查更新:发现新版本', info.updateAvailable === true && info.latest === '1.5.0', info);
+  assert('检查更新:带上 Setup 包下载地址', info.downloadUrl === RELEASE.assets[2].browser_download_url, info.downloadUrl);
+  assert('检查更新:附带 Releases 页面地址', typeof info.pageUrl === 'string' && info.pageUrl.includes('releases'), info.pageUrl);
+  const same = await updater.checkForUpdate({ currentVersion: '1.5.0', apiUrl: base + '/releases/latest' });
+  assert('检查更新:同版本不提示更新', same.updateAvailable === false, same);
+  s.server.close();
+
+  // 4) 下载:跟随重定向,文件落盘,进度回调
+  s = await makeServer({ redirect: true });
+  const base2 = 'http://127.0.0.1:' + s.server.address().port;
+  const dest = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rpx-')), 'setup.exe');
+  let progress = null;
+  const dl = await updater.downloadFile({ url: base2 + '/setup.exe', destFile: dest, waitMs: async () => {}, onProgress: (p) => { progress = p; } });
+  assert('下载:跟随重定向并写入文件', fs.readFileSync(dest, 'utf8') === 'hello-patch', fs.readFileSync(dest, 'utf8'));
+  assert('下载:报告进度与字节数', dl.bytes === 11 && progress && progress.received === 11, { dl, progress });
+  s.server.close();
+
+  // 5) 下载:瞬时失败自动重试(失败 2 次后第 3 次成功)
+  s = await makeServer({ failTimes: 2 });
+  const base3 = 'http://127.0.0.1:' + s.server.address().port;
+  const dest2 = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rpx-')), 'setup.exe');
+  const dl2 = await updater.downloadFile({ url: base3 + '/setup.exe', destFile: dest2, waitMs: async () => {} });
+  assert('下载:瞬时失败后重试成功', fs.readFileSync(dest2, 'utf8') === 'hello-patch');
+  assert('下载:重试后第 3 次请求成功', s.hits() === 3, s.hits());
+  s.server.close();
+
+  // 6) 下载:连续失败,重试 3 次后放弃并报错,错误附 Releases 链接
+  s = await makeServer({ failTimes: 999 });
+  const base4 = 'http://127.0.0.1:' + s.server.address().port;
+  let err = null;
+  try { await updater.downloadFile({ url: base4 + '/setup.exe', destFile: path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rpx-')), 'setup.exe'), waitMs: async () => {} }); } catch (e) { err = e; }
+  assert('下载:重试 3 次(共 4 次请求)后失败', err !== null && s.hits() === 1 + updater.MAX_RETRIES, { hits: s.hits(), msg: err && err.message });
+  assert('下载:失败错误携带 Releases 页面链接', !!err && typeof err.pageUrl === 'string' && err.pageUrl.includes('/releases'), err && err.pageUrl);
+  assert('下载:失败信息提示手动下载', !!err && err.message.includes('手动下载'), err && err.message);
+  s.server.close();
+
+  console.log(failed ? 'UPDATE-TEST FAIL' : 'UPDATE-TEST ALL PASS');
+  process.exit(failed ? 1 : 0);
+})().catch((e) => { console.error('UPDATE-TEST ERROR', e); process.exit(1); });

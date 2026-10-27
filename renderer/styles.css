@@ -23,9 +23,12 @@ button { font: inherit; cursor: pointer; border: 0; background: none; color: inh
 input, select, textarea { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 svg { flex-shrink: 0; }
+/* CSP style-src 'self' 会拦截 HTML 内联 style 属性,svg 藏身必须靠类,不能靠 style="position:absolute" */
+.icon-defs { position: absolute; width: 0; height: 0; }
 .icon { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .mono { font-family: var(--mono); }
-.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+/* sr-only 必须锚定到左上角:不设 top 会停在静态位置(100vh 的 .app 之后),把 document 撑出整窗滚动条 */
+.sr-only { position: absolute; top: 0; left: 0; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
 .app { display: grid; grid-template-columns: 56px 1fr; height: 100vh; overflow: hidden; }
 
@@ -43,16 +46,17 @@ svg { flex-shrink: 0; }
 .page { display: flex; flex-direction: column; height: 100vh; min-width: 0; }
 .top { display: flex; align-items: baseline; gap: 16px; padding: 28px 40px 20px; border-bottom: 1px solid var(--line); }
 .top h1 { font-size: 21px; font-weight: 600; letter-spacing: -0.02em; }
-.top .crumb { font-size: 12px; color: var(--ink-3); }
 .top .right { margin-left: auto; font-size: 12px; color: var(--ink-2); display: flex; align-items: center; gap: 8px; }
 .top .right code { font-size: 12px; color: var(--ink-2); }
 .top .btn { align-self: center; }
 .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); align-self: center; }
 .dot.off { background: var(--ink-3); }
 .content { flex: 1; min-height: 0; overflow: auto; padding: 32px 40px 48px; min-width: 0; }
-.content.narrow { max-width: 760px; }
+/* 宽度上限放在内容上而不是滚动容器上,滚动条始终贴窗口右缘,不悬在栏中 */
+.content.narrow > form, .content.narrow > .update-block { max-width: 760px; }
 
 h2 { font-size: 13px; font-weight: 500; color: var(--ink-2); margin-bottom: 16px; }
+h2.tight { margin-bottom: 4px; }
 .hint { font-size: 12px; color: var(--ink-3); }
 .block { padding: 28px 0; border-bottom: 1px solid var(--line); }
 .block:first-child { padding-top: 0; }
@@ -83,6 +87,7 @@ table.models tr:hover td { background: var(--panel); }
 table.models .name { font-weight: 500; }
 table.models .note { color: var(--ink-2); }
 table.models .num { font-variant-numeric: tabular-nums; }
+table.models .w-actions { width: 72px; }
 .tag { font-size: 11px; color: var(--green-ink); background: var(--green-soft); border-radius: 4px; padding: 1px 6px; white-space: nowrap; }
 .tag.lite { color: var(--ink-2); background: var(--panel); }
 .rowcopy { color: var(--ink-3); display: inline-flex; padding: 2px; border-radius: 4px; }
@@ -141,6 +146,15 @@ table.models .num { font-variant-numeric: tabular-nums; }
 .row-between { display: flex; align-items: center; justify-content: space-between; gap: 32px; }
 .form-actions { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding-top: 24px; border-top: 1px solid var(--line); margin-top: 8px; }
 .saved { color: var(--green-ink); font-size: 12px; margin-top: 12px; }
+
+/* ---- 软件更新 ---- */
+.update-row { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+.update-current { font-size: 13px; color: var(--ink-2); }
+.update-current code { font-size: 13px; }
+.update-state { font-size: 12px; color: var(--ink-3); flex: 1; min-width: 160px; }
+.update-actions { display: inline-flex; gap: 10px; margin-left: auto; }
+#update-progress { margin-top: 12px; font-variant-numeric: tabular-nums; }
+#update-fallback { margin-top: 8px; }
 
 /* ---- 对话调试 ---- */
 .content.play { display: grid; grid-template-columns: 240px minmax(0, 1fr); gap: 32px; overflow: hidden; }

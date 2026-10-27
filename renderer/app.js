@@ -198,6 +198,77 @@ async function saveSettings(event) {
   finally { state.busy = false; button.disabled = false; button.innerHTML = '<svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>保存设置'; updateService(); }
 }
 
+/* ---------- 软件更新 ---------- */
+
+const RELEASES_PAGE_URL = 'https://github.com/BlackTor-tor/raccoon-proxy-desktop/releases/latest';
+const updateInfo = { latest: '', downloadUrl: '' };
+const fmtMB = (n) => (n / 1048576).toFixed(1) + ' MB';
+const hasBridge = (fn) => !!(bridge && typeof bridge[fn] === 'function');
+function showUpdateFallback(message) {
+  const box = $('update-fallback');
+  box.replaceChildren(document.createTextNode(message + ' '));
+  const link = document.createElement('button');
+  link.type = 'button'; link.className = 'text-button';
+  link.textContent = '前往 GitHub Releases 手动下载';
+  link.title = RELEASES_PAGE_URL;
+  link.addEventListener('click', () => { if (hasBridge('openReleases')) bridge.openReleases(); });
+  box.appendChild(link);
+  box.hidden = false;
+}
+function setUpdateBusy(busy) { $('update-check').disabled = busy; if (!$('update-download').hidden) $('update-download').disabled = busy; }
+async function checkForUpdateUI() {
+  $('update-fallback').hidden = true; $('update-progress').hidden = true;
+  $('update-download').hidden = true; $('update-install').hidden = true;
+  if (!hasBridge('checkUpdate')) {
+    $('update-state').textContent = '桌面环境未就绪,无法检查更新';
+    showUpdateFallback('检查更新失败:更新服务不可用。');
+    return;
+  }
+  $('update-state').textContent = '正在检查更新…'; setUpdateBusy(true);
+  try {
+    const r = await bridge.checkUpdate();
+    if (!r || r.ok === false) throw new Error();
+    $('update-current').textContent = 'v' + r.current;
+    updateInfo.latest = r.latest; updateInfo.downloadUrl = r.downloadUrl;
+    if (!r.updateAvailable) $('update-state').textContent = `已是最新版本(v${r.current})`;
+    else { $('update-state').textContent = `发现新版本 v${r.latest},可下载安装包`; $('update-download').hidden = false; }
+  } catch {
+    $('update-state').textContent = '无法检查更新,请稍后重试';
+    showUpdateFallback('检查更新失败:网络不可达或接口受限。');
+  } finally { setUpdateBusy(false); }
+}
+async function downloadUpdateUI() {
+  if (!hasBridge('downloadUpdate') || !updateInfo.downloadUrl) return;
+  $('update-fallback').hidden = true;
+  setUpdateBusy(true);
+  const result = await bridge.downloadUpdate({ url: updateInfo.downloadUrl, latest: updateInfo.latest });
+  if (!result || result.ok === false) { setUpdateBusy(false); showUpdateFallback('下载未能开始:' + ((result && result.error) || '未知原因')); }
+}
+function handleUpdateProgress(p) {
+  if (!p || !p.status) return;
+  const progress = $('update-progress');
+  if (p.status === 'downloading') {
+    progress.hidden = false;
+    progress.textContent = p.total ? `正在下载 v${updateInfo.latest}… ${fmtMB(p.received)} / ${fmtMB(p.total)}(${Math.round((p.received / p.total) * 100)}%)` : `正在下载 v${updateInfo.latest}… ${fmtMB(p.received)}`;
+  } else if (p.status === 'ready') {
+    setUpdateBusy(false);
+    $('update-download').hidden = true;
+    progress.hidden = false; progress.textContent = '安装包已下载完成,点击「安装并重启」完成升级。';
+    $('update-install').hidden = false;
+    toast('新版本已就绪');
+  } else if (p.status === 'failed') {
+    setUpdateBusy(false);
+    progress.hidden = true;
+    showUpdateFallback('下载失败(已自动重试 3 次),请检查网络后重试,或手动下载最新版。');
+    addLog('更新包下载失败:' + (p.message || ''), 'error');
+  }
+}
+async function installUpdateUI() {
+  if (!hasBridge('installUpdate')) return;
+  const r = await bridge.installUpdate();
+  if (r && r.ok === false) toast(r.error || '安装失败');
+}
+
 /* ---------- 历史对话 ---------- */
 
 const HISTORY_CAP = 50;
@@ -363,6 +434,10 @@ $('copy-api-key').addEventListener('click', () => { if (state.settings.apiKey) c
 $('reveal-key').addEventListener('click', () => { state.keyVisible = !state.keyVisible; $('reveal-key').setAttribute('aria-label', state.keyVisible ? '隐藏 API Key' : '显示 API Key'); $('reveal-key').title = state.keyVisible ? '隐藏 API Key' : '显示 API Key'; updateService(); });
 $('clear-logs').addEventListener('click', () => { $('log-lines').replaceChildren(); const empty = document.createElement('div'); empty.className = 'log-empty'; empty.textContent = '日志已清空,等待新的请求…'; $('log-lines').appendChild(empty); state.logCount = 0; $('log-count').textContent = '0 条'; toast('日志已清空'); });
 $('auto-start').addEventListener('click', () => { state.autoStartDraft = !state.autoStartDraft; $('auto-start').setAttribute('aria-checked', String(state.autoStartDraft)); });
+$('update-check').addEventListener('click', checkForUpdateUI);
+$('update-download').addEventListener('click', downloadUpdateUI);
+$('update-install').addEventListener('click', installUpdateUI);
+if (hasBridge('onUpdateProgress')) bridge.onUpdateProgress(handleUpdateProgress);
 $('settings-form').addEventListener('submit', saveSettings);
 $('settings-form').addEventListener('input', () => $('save-result').hidden = true);
 $('chat-form').addEventListener('submit', sendMessage);
@@ -376,7 +451,7 @@ window.addEventListener('pagehide', () => state.controller?.abort());
 setTheme(state.theme); populateSettings(); updateService(); renderModels(); renderHistory(); navigate(storage.get('page', 'dashboard'));
 if (nativeService) {
   $('service-toggle').disabled = true;
-  bridge.getStatus().then(status => { state.running = status.running === true; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) document.querySelector('.rail-version').textContent = 'v' + status.version; $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
+  bridge.getStatus().then(status => { state.running = status.running === true; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) { document.querySelector('.rail-version').textContent = 'v' + status.version; $('update-current').textContent = 'v' + status.version; } $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
   if (typeof bridge.onLog === 'function') bridge.onLog(entry => addLog(String(entry.message || ''), entry.level || 'info'));
   if (typeof bridge.onState === 'function') bridge.onState(st => { if (st.state === 'error' && st.error) addLog(st.error, 'error'); if (state.busy) return; const running = st.state === 'running'; if (state.running !== running) { state.running = running; updateService(); addLog(running ? '服务已启动' : '服务已停止'); } });
   if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok) applyUpstream(h); });
