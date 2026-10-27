@@ -316,6 +316,8 @@ async function sendMessage(event) {
   if (!state.running) { $('chat-alert').textContent = '服务已停止，请先在仪表盘开启代理服务。'; $('chat-alert').hidden = false; return; }
   $('chat-alert').hidden = true; appendMessage('user', text); $('chat-input').value = ''; $('chat-input').style.height = '42px';
   const reply = appendMessage('assistant', ''); reply.bubble.classList.add('streaming'); setSending(true); $('chat-status').textContent = '正在等待模型响应';
+  const liveStatus = document.createElement('div'); liveStatus.className = 'message-status'; liveStatus.textContent = '等待上游响应…'; reply.content.appendChild(liveStatus);
+  let phase = 'waiting';
   const controller = new AbortController(); state.controller = controller; let timedOut = false; let timeout; let raw = ''; let drawn = ''; let reasoning = ''; let finished = false;
   const effort = $('chat-effort').value;
   function armTimeout() { clearTimeout(timeout); timeout = setTimeout(() => { timedOut = true; controller.abort(); }, effort === 'high' ? 240000 : 120000); }
@@ -328,7 +330,7 @@ async function sendMessage(event) {
     if (effort) bodyObj.reasoning_effort = effort;
     const response = await fetch(baseUrl() + '/chat/completions', { method: 'POST', headers, body: JSON.stringify(bodyObj), signal: controller.signal });
     if (!response.ok) { const error = new Error('http'); error.status = response.status; throw error; }
-    if ((response.headers.get('content-type') || '').includes('text/event-stream') && response.body) await consumeSSE(response, chunk => { raw += chunk; armTimeout(); }, controller.signal, chunk => { reasoning += chunk; if (reply.thoughtWrap) { reply.thoughtWrap.hidden = false; reply.thoughtBody.textContent = reasoning; scrollChat(); } });
+    if ((response.headers.get('content-type') || '').includes('text/event-stream') && response.body) await consumeSSE(response, chunk => { raw += chunk; armTimeout(); if (phase !== 'answering') { phase = 'answering'; liveStatus.textContent = '生成中…'; } }, controller.signal, chunk => { reasoning += chunk; if (reply.thoughtWrap) { reply.thoughtWrap.hidden = false; reply.thoughtBody.textContent = reasoning; } if (phase === 'waiting') { phase = 'reasoning'; } if (phase === 'reasoning') { liveStatus.textContent = '思考中… ' + reasoning.length + ' 字'; scrollChat(); } });
     else { const result = await response.json(); if (result.error) throw new Error('api-error'); const msg = result.choices?.[0]?.message || {}; raw = msg.content || ''; if (typeof raw !== 'string') throw new Error('invalid-response'); if (typeof msg.reasoning_content === 'string' && msg.reasoning_content && reply.thoughtWrap) { reasoning = msg.reasoning_content; reply.thoughtWrap.hidden = false; reply.thoughtBody.textContent = reasoning; } }
     clearTimeout(timeout); if (!raw.trim()) throw new Error('empty-response');
     while (drawn.length < raw.length && !controller.signal.aborted) await sleep(25);
@@ -345,7 +347,7 @@ async function sendMessage(event) {
     else { if (!interrupted) reply.bubble.classList.add('error'); const retry = document.createElement('button'); retry.type = 'button'; retry.className = 'text-button'; retry.textContent = '重新编辑这条消息'; retry.addEventListener('click', () => { $('chat-input').value = text; $('chat-input').focus(); }); reply.content.appendChild(retry); }
     addLog(message, interrupted ? 'warn' : 'error'); $('chat-status').textContent = message;
     if (raw) saveConversation();
-  } finally { clearInterval(painter); clearTimeout(timeout); if (finished) reply.answer.textContent = raw; reply.bubble.classList.remove('streaming'); setSending(false); state.controller = null; scrollChat(); $('chat-input').focus(); }
+  } finally { clearInterval(painter); clearTimeout(timeout); if (finished) reply.answer.textContent = raw; liveStatus.remove(); reply.bubble.classList.remove('streaming'); setSending(false); state.controller = null; scrollChat(); $('chat-input').focus(); }
 }
 
 /* ---------- 事件绑定与启动 ---------- */

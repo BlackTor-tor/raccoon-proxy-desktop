@@ -64,7 +64,16 @@ app.whenReady().then(async () => {
     const sleep = ms => new Promise(r => setTimeout(r, ms));
     document.getElementById('chat-input').value = '只回复两个字:收到';
     document.getElementById('chat-form').requestSubmit();
-    for (let i = 0; i < 40; i++) { await sleep(500); if (document.querySelector('.message-note') || document.querySelector('.message .text-button')) break; }
+    let sawStatus = false, sawPartial = false;
+    for (let i = 0; i < 400; i++) {
+      await sleep(100);
+      const note = !!document.querySelector('.message-note');
+      const statusEl = document.querySelector('.message.assistant .message-status');
+      const answerEl = document.querySelector('.message.assistant .answer');
+      if (statusEl && statusEl.textContent.trim()) sawStatus = true;
+      if (!note && answerEl && answerEl.textContent.length > 0) sawPartial = true;
+      if (note || document.querySelector('.message .text-button')) break;
+    }
     const thought = document.querySelector('.message.assistant .thought');
     return {
       messages: document.querySelectorAll('.message').length,
@@ -74,11 +83,14 @@ app.whenReady().then(async () => {
       thoughtVisible: !!thought && !thought.hidden,
       thoughtText: (document.querySelector('.message.assistant .thought-body') || {}).textContent || '',
       title: (document.querySelector('.history-item-title') || {}).textContent || '',
+      sawStatus, sawPartial,
     };
   })()`);
   assert('发送后产生对话与历史记录', afterSend.messages >= 2 && afterSend.historyItems === 1 && afterSend.stored === 1, afterSend);
   assert('助手有真实回复', afterSend.answer.includes('收到'), afterSend.answer.slice(0, 40));
   assert('思维链已渲染(可折叠)', afterSend.thoughtVisible && afterSend.thoughtText.includes('思考中'), { visible: afterSend.thoughtVisible, text: afterSend.thoughtText });
+  assert('等待期有实时状态提示', afterSend.sawStatus === true, afterSend.sawStatus);
+  assert('回答在完成前已流式增量出现', afterSend.sawPartial === true, afterSend.sawPartial);
   assert('reasoning_effort 已随请求发送', lastBody && lastBody.reasoning_effort === 'low', lastBody && lastBody.reasoning_effort);
   assert('历史标题取自首条消息', afterSend.title.includes('收到') || afterSend.title.length > 0, afterSend.title);
 
