@@ -22,6 +22,7 @@
 ## 快速开始
 
 1. 从 [Releases](../../releases) 下载安装包(`RaccoonProxy-Setup-x.x.x.exe`)或便携版(`RaccoonProxy-x.x.x-portable.exe`)
+   > 国内网络下载慢时,在文件下载链接前加 `https://gh-proxy.com/` 即可走加速镜像(内容与官方一致;v1.6.0 起客户端内置自动测速加速,升级一次之后无需手动处理)
 2. 打开 RaccoonProxy,在「设置」页填写上游账号的手机号与密码,保存
 3. 仪表盘点亮服务开关
 4. 在你的工具里这样接入:
