@@ -31,9 +31,10 @@ const upstream = http.createServer((req, res) => {
     return json(res, {
       ...pointsPayload(),
       items: [
-        { id: 'u1', kind: 'usage', at: '2026-10-29T14:18:44+08:00', event: 'SenseChat-5', points: -2, prompt: 12, completion: 4, cached: 0, total: 16 },
+        { id: 'u1', kind: 'usage', at: '2026-10-29T14:18:44+08:00', event: 'SenseChat-5', points: -2, prompt: 12, completion: 4, cached: 0, total: 16, free: false },
         { id: 'b2', kind: 'bill', at: '2026-10-29T00:23:12+08:00', event: '每日积分发放', points: 798, prompt: null, completion: null, cached: null, total: null },
-        { id: 'u3', kind: 'usage', at: '2026-10-28T19:02:01+08:00', event: 'SenseChat-5', points: null, prompt: 1200, completion: 300, cached: 800, total: 1500 },
+        { id: 'u3', kind: 'usage', at: '2026-10-28T19:02:01+08:00', event: 'sn-deepseek-v4-1-flash-1017', points: null, prompt: 1200, completion: 300, cached: 800, total: 1500, free: true, billingNote: '限免至10月31日' },
+        { id: 'u4', kind: 'usage', at: '2026-10-28T19:01:01+08:00', event: 'SenseChat-5', points: null, prompt: 30, completion: 8, cached: 0, total: 38, free: false },
       ],
       nextCursor: null,
       hasMore: false,
@@ -159,9 +160,10 @@ app.whenReady().then(async () => {
     };
   })()`);
   assert('积分管理页可进入并显示总积分', pointsBefore.pageVisible === true && pointsBefore.available === '6,798' && pointsBefore.breakdown.includes('今日 798') && pointsBefore.breakdown.includes('奖励 6,000'), pointsBefore);
-  assert('明细含 token 读取/写入/缓存与变动列', pointsBefore.rows.length === 3 && pointsBefore.rows[0].length === 6 && pointsBefore.rows[0][2] === '12' && pointsBefore.rows[0][3] === '4' && pointsBefore.rows[0][4] === '0' && pointsBefore.rows[0][5] === '-2', pointsBefore.rows);
+  assert('明细含 token 读取/写入/缓存与变动列', pointsBefore.rows.length === 4 && pointsBefore.rows[0].length === 6 && pointsBefore.rows[0][2] === '12' && pointsBefore.rows[0][3] === '4' && pointsBefore.rows[0][4] === '0' && pointsBefore.rows[0][5] === '-2', pointsBefore.rows);
   assert('官方账单行无 token 时显示占位', pointsBefore.rows[1][2] === '—' && pointsBefore.rows[1][3] === '—' && pointsBefore.rows[1][5] === '+798', pointsBefore.rows[1]);
-  assert('未入账请求变动显示占位', pointsBefore.rows[2][2] === '1,200' && pointsBefore.rows[2][3] === '300' && pointsBefore.rows[2][4] === '800' && pointsBefore.rows[2][5] === '—', pointsBefore.rows[2]);
+  assert('限免模型变动显示「免费」', pointsBefore.rows[2][2] === '1,200' && pointsBefore.rows[2][5] === '免费', pointsBefore.rows[2]);
+  assert('未入账请求变动显示占位', pointsBefore.rows[3][2] === '30' && pointsBefore.rows[3][5] === '—', pointsBefore.rows[3]);
   assert('未签到时签到按钮可用', pointsBefore.btnDisabled === false && pointsBefore.label === '立即签到', pointsBefore);
 
   const afterCheckin = await run(`(async () => {

@@ -287,6 +287,9 @@ function recordUsage({ model, usage, at }) {
   const prompt = Number(usage?.prompt_tokens) || 0;
   const completion = Number(usage?.completion_tokens) || 0;
   const cached = Number(usage?.prompt_tokens_details?.cached_tokens ?? usage?.cache_read_input_tokens) || 0;
+  // 限免模型(有效倍率 0)官方不生成账单,记下计费状态让明细显示「免费」而不是「待入账」
+  const cat = catalogCache.models && catalogCache.models.find((m) => m.id === model);
+  const free = !!(cat && Number(cat.effectiveMultiplier) === 0);
   const rec = {
     id: 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
     at: new Date(at || Date.now()).toISOString(),
@@ -297,6 +300,8 @@ function recordUsage({ model, usage, at }) {
     total: Number(usage?.total_tokens) || prompt + completion,
     points: null,
     billId: null,
+    free,
+    billingNote: cat ? cat.billingNote || '' : '',
   };
   usageLog.unshift(rec);
   if (usageLog.length > USAGE_LIMIT) usageLog.length = USAGE_LIMIT;
@@ -361,7 +366,15 @@ function buildBillsView(billItems) {
 }
 
 function usageRow(rec) {
-  return { id: rec.id, kind: 'usage', at: rec.at, event: rec.model, points: Number.isFinite(rec.points) ? rec.points : null, prompt: rec.prompt, completion: rec.completion, cached: rec.cached, total: rec.total };
+  // 旧记录没有 free 标记(1.8.0 之前写入),按当前模型目录补判限免
+  let free = rec.free;
+  let note = rec.billingNote || '';
+  if (free === undefined) {
+    const cat = catalogCache.models && catalogCache.models.find((m) => m.id === rec.model);
+    free = !!(cat && Number(cat.effectiveMultiplier) === 0);
+    note = note || (cat ? cat.billingNote || '' : '');
+  }
+  return { id: rec.id, kind: 'usage', at: rec.at, event: rec.model, points: Number.isFinite(rec.points) ? rec.points : null, prompt: rec.prompt, completion: rec.completion, cached: rec.cached, total: rec.total, free: !!free, billingNote: note };
 }
 
 async function autoCheckin(reason) {
@@ -421,6 +434,8 @@ async function fetchCatalog(force = false) {
         display: m.description || m.name,
         note: m.display_description || '',
         billing: m.billing_category || '',
+        effectiveMultiplier: typeof m.billing_effective_multiplier === 'number' ? m.billing_effective_multiplier : null,
+        billingNote: m.billing_status_note || '',
         visible: m.visible !== false,
       });
     }

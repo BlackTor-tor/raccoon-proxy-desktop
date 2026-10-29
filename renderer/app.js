@@ -383,9 +383,18 @@ function renderBills() {
       return td;
     });
     const delta = document.createElement('td');
-    delta.className = 'num delta' + (b.points > 0 ? ' pos' : b.points < 0 ? ' neg' : '');
-    delta.textContent = Number.isFinite(b.points) ? fmtDelta(b.points) : '—';
-    if (!Number.isFinite(b.points)) delta.title = '账单入账后自动回填';
+    if (Number.isFinite(b.points)) {
+      delta.className = 'num delta' + (b.points > 0 ? ' pos' : b.points < 0 ? ' neg' : '');
+      delta.textContent = fmtDelta(b.points);
+    } else if (b.free) {
+      delta.className = 'num delta free';
+      delta.textContent = '免费';
+      delta.title = b.billingNote || '当前限免,不消耗积分';
+    } else {
+      delta.className = 'num delta';
+      delta.textContent = '—';
+      delta.title = '账单入账后自动回填';
+    }
     tr.append(time, event, ...tokens, delta);
     tbody.appendChild(tr);
   }

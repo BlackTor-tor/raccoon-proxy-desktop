@@ -237,6 +237,7 @@ table.bills .bill-time { color: var(--ink-2); font-variant-numeric: tabular-nums
 table.bills .bill-event { color: var(--ink); white-space: normal; }
 table.bills .delta.pos { color: var(--green-ink); }
 table.bills .delta.neg { color: var(--ink); }
+table.bills .delta.free { color: var(--green-ink); }
 .bills-empty { font-size: 12px; color: var(--ink-3); padding: 20px 0; }
 .bills-foot { padding-top: 10px; }
 
