@@ -358,14 +358,17 @@ ipcMain.handle('update:download', (_e, payload) => {
   // 以检查结果解析出的资产形态为准(便携版缺资产会回退成安装包)
   const variant = payload && payload.variant === 'portable' ? 'portable' : 'setup';
   updateFileVariant = variant;
+  const sha256 = payload && typeof payload.sha256 === 'string' ? payload.sha256.replace(/[^a-f0-9]/gi, '').toLowerCase() : '';
   // 便携版下载到便携版 exe 同目录(运行中的 exe 无法自替换,退出后由用户替换/直接运行);
   // 安装版下载到临时目录后交给 NSIS 安装器。
   const fileName = variant === 'portable' ? `RaccoonProxy-${latest || 'latest'}-portable.exe` : `RaccoonProxy-Setup-${latest || 'latest'}.exe`;
   const destFile = variant === 'portable' && PORTABLE_DIR ? path.join(PORTABLE_DIR, fileName) : path.join(app.getPath('temp'), fileName);
   send('update:progress', { status: 'downloading', received: 0, total: 0, variant });
-  downloadFile({ url, destFile, onProgress: (p) => send('update:progress', { status: 'downloading', ...p, variant }) })
-    .then(() => {
+  // downloadFile 内部会并行测速选直连/镜像最快线路,并用 GitHub 摘要校验完整性
+  downloadFile({ url, destFile, sha256: sha256 || undefined, onProgress: (p) => send('update:progress', { status: 'downloading', ...p, variant }) })
+    .then((r) => {
       updateFile = destFile;
+      appendLog(`更新包已下载(${r && r.source && r.source.includes('github.com') ? '直连' : '加速线路'})并校验通过`);
       send('update:progress', { status: 'ready', file: destFile, latest, variant });
     })
     .catch((e) => {
@@ -414,7 +417,7 @@ async function autoCheckUpdate() {
   try {
     const info = await checkForUpdate({ currentVersion: app.getVersion(), variant: APP_VARIANT });
     if (info.updateAvailable && info.latest && info.latest !== settings.skipVersion) {
-      send('update:available', { latest: info.latest, current: app.getVersion(), downloadUrl: info.downloadUrl, variant: info.variant });
+      send('update:available', { latest: info.latest, current: app.getVersion(), downloadUrl: info.downloadUrl, sha256: info.sha256, variant: info.variant });
     }
   } catch {
     // 后台静默检查失败不打扰用户,设置页手动检查仍可用

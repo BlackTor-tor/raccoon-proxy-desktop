@@ -202,7 +202,7 @@ async function saveSettings(event) {
 /* ---------- 软件更新 ---------- */
 
 const RELEASES_PAGE_URL = 'https://github.com/BlackTor-tor/raccoon-proxy-desktop/releases/latest';
-const updateInfo = { latest: '', downloadUrl: '', variant: 'setup' };
+const updateInfo = { latest: '', downloadUrl: '', variant: 'setup', sha256: '' };
 const fmtMB = (n) => (n / 1048576).toFixed(1) + ' MB';
 const hasBridge = (fn) => !!(bridge && typeof bridge[fn] === 'function');
 const isPortable = () => (updateInfo.variant || state.variant) === 'portable';
@@ -231,7 +231,7 @@ async function checkForUpdateUI() {
     const r = await bridge.checkUpdate();
     if (!r || r.ok === false) throw new Error();
     $('update-current').textContent = 'v' + r.current;
-    updateInfo.latest = r.latest; updateInfo.downloadUrl = r.downloadUrl; updateInfo.variant = r.variant === 'portable' ? 'portable' : 'setup';
+    updateInfo.latest = r.latest; updateInfo.downloadUrl = r.downloadUrl; updateInfo.variant = r.variant === 'portable' ? 'portable' : 'setup'; updateInfo.sha256 = typeof r.sha256 === 'string' ? r.sha256 : '';
     if (!r.updateAvailable) $('update-state').textContent = `已是最新版本(v${r.current})`;
     else { $('update-state').textContent = `发现新版本 v${r.latest},可下载${isPortable() ? '便携版' : '安装包'}`; $('update-download').hidden = false; }
   } catch {
@@ -243,7 +243,7 @@ async function downloadUpdateUI() {
   if (!hasBridge('downloadUpdate') || !updateInfo.downloadUrl) return;
   $('update-fallback').hidden = true;
   setUpdateBusy(true);
-  const result = await bridge.downloadUpdate({ url: updateInfo.downloadUrl, latest: updateInfo.latest, variant: updateInfo.variant });
+  const result = await bridge.downloadUpdate({ url: updateInfo.downloadUrl, latest: updateInfo.latest, variant: updateInfo.variant, sha256: updateInfo.sha256 });
   if (!result || result.ok === false) { setUpdateBusy(false); showUpdateFallback('下载未能开始:' + ((result && result.error) || '未知原因')); }
 }
 function handleUpdateProgress(p) {
@@ -352,11 +352,12 @@ async function checkinNow() {
 
 /* ---------- 更新提醒弹窗 ---------- */
 
-const updateModalInfo = { latest: '', downloadUrl: '', variant: 'setup' };
+const updateModalInfo = { latest: '', downloadUrl: '', variant: 'setup', sha256: '' };
 function showUpdateModal(info) {
   if (!info || !info.latest) return;
   updateModalInfo.latest = info.latest;
   updateModalInfo.downloadUrl = info.downloadUrl || '';
+  updateModalInfo.sha256 = typeof info.sha256 === 'string' ? info.sha256 : '';
   updateModalInfo.variant = info.variant === 'portable' ? 'portable' : info.variant === 'setup' ? 'setup' : state.variant === 'portable' ? 'portable' : 'setup';
   $('update-modal-latest').textContent = 'v' + info.latest;
   $('update-modal-current').textContent = 'v' + (info.current || '');
@@ -546,6 +547,7 @@ $('update-modal-go').addEventListener('click', () => {
     updateInfo.latest = updateModalInfo.latest;
     updateInfo.downloadUrl = updateModalInfo.downloadUrl;
     updateInfo.variant = updateModalInfo.variant;
+    updateInfo.sha256 = updateModalInfo.sha256;
     $('update-state').textContent = `发现新版本 v${updateModalInfo.latest},开始下载${updateModalInfo.variant === 'portable' ? '便携版' : '安装包'}…`;
     downloadUpdateUI();
   }

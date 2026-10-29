@@ -4,6 +4,7 @@ const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const crypto = require('crypto');
 const updater = require('../updater');
 
 let failed = false;
@@ -17,7 +18,7 @@ const RELEASE = {
   assets: [
     { name: 'RaccoonProxy-1.5.0-portable.exe', browser_download_url: 'http://127.0.0.1:0/portable.exe', size: 90 },
     { name: 'RaccoonProxy-Setup-1.5.0.exe.blockmap', browser_download_url: 'http://127.0.0.1:0/blockmap', size: 1 },
-    { name: 'RaccoonProxy-Setup-1.5.0.exe', browser_download_url: 'http://127.0.0.1:0/setup.exe', size: 80 },
+    { name: 'RaccoonProxy-Setup-1.5.0.exe', browser_download_url: 'http://127.0.0.1:0/setup.exe', size: 80, digest: 'sha256:' + 'A'.repeat(64) },
     { name: 'latest.yml', browser_download_url: 'http://127.0.0.1:0/latest.yml', size: 1 },
   ],
 };
@@ -85,6 +86,13 @@ function makeServer({ failTimes = 0, redirect = false } = {}) {
   assert('检查更新(便携版):下载便携版资产', infoPortable.updateAvailable === true && infoPortable.variant === 'portable' && infoPortable.downloadUrl === RELEASE.assets[0].browser_download_url, infoPortable);
   const infoFallback = await updater.checkForUpdate({ currentVersion: '1.4.1', apiUrl: base + '/releases/setup-only', variant: 'portable' });
   assert('便携版缺资产时回退 Setup 并标注形态', infoFallback.updateAvailable === true && infoFallback.variant === 'setup' && infoFallback.downloadUrl === RELEASE.assets[2].browser_download_url, infoFallback);
+  assert('检查更新:携带资产 sha256 摘要(小写)', info.sha256 === 'a'.repeat(64), info.sha256);
+
+  // 3.5) 下载候选:GitHub 地址自动加镜像,非 GitHub 不加速
+  const ghAsset = 'https://github.com/BlackTor-tor/raccoon-proxy-desktop/releases/download/v1.5.0/RaccoonProxy-Setup-1.5.0.exe';
+  const cands = updater.downloadCandidates(ghAsset);
+  assert('下载候选:GitHub 地址 = 直连 + 全部镜像', cands.length === 1 + updater.MIRRORS.length && cands[0] === ghAsset && cands.every((u, i) => i === 0 || u === `${updater.MIRRORS[i - 1]}/${ghAsset}`), cands);
+  assert('下载候选:非 GitHub 地址保持单线路', updater.downloadCandidates('http://127.0.0.1:1/x.exe').length === 1);
   const same = await updater.checkForUpdate({ currentVersion: '1.5.0', apiUrl: base + '/releases/latest' });
   assert('检查更新:同版本不提示更新', same.updateAvailable === false, same);
   s.server.close();
@@ -117,6 +125,30 @@ function makeServer({ failTimes = 0, redirect = false } = {}) {
   assert('下载:失败错误携带 Releases 页面链接', !!err && typeof err.pageUrl === 'string' && err.pageUrl.includes('/releases'), err && err.pageUrl);
   assert('下载:失败信息提示手动下载', !!err && err.message.includes('手动下载'), err && err.message);
   s.server.close();
+
+  // 7) 下载:主线路失败自动切换备用线路(测速排序 + 失败兜底)
+  const bad = await makeServer({ failTimes: 999 });
+  const good = await makeServer();
+  const badBase = 'http://127.0.0.1:' + bad.server.address().port;
+  const goodBase = 'http://127.0.0.1:' + good.server.address().port;
+  const destM = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rpx-')), 'mirror.exe');
+  const dlM = await updater.downloadFile({ url: badBase + '/setup.exe', destFile: destM, candidates: [badBase + '/setup.exe', goodBase + '/setup.exe'], waitMs: async () => {} });
+  assert('下载:主线路失败自动切换备用线路', fs.readFileSync(destM, 'utf8') === 'hello-patch' && dlM.source === goodBase + '/setup.exe', dlM.source);
+  bad.server.close();
+  good.server.close();
+
+  // 8) 下载:sha256 摘要校验(通过 / 不匹配删除并报错)
+  const hashSrv = await makeServer();
+  const baseH = 'http://127.0.0.1:' + hashSrv.server.address().port;
+  const expectedHash = crypto.createHash('sha256').update('hello-patch').digest('hex');
+  const destH = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rpx-')), 'hash-ok.exe');
+  await updater.downloadFile({ url: baseH + '/setup.exe', destFile: destH, sha256: expectedHash, probe: false, waitMs: async () => {} });
+  assert('下载:sha256 校验通过', fs.readFileSync(destH, 'utf8') === 'hello-patch');
+  const destHashBad = path.join(fs.mkdtempSync(path.join(os.tmpdir(), 'rpx-')), 'hash-bad.exe');
+  let hashErr = null;
+  try { await updater.downloadFile({ url: baseH + '/setup.exe', destFile: destHashBad, sha256: 'b'.repeat(64), probe: false, waitMs: async () => {} }); } catch (e) { hashErr = e; }
+  assert('下载:摘要不匹配时报错并删除文件', !!hashErr && hashErr.message.includes('完整性') && !fs.existsSync(destHashBad), { msg: hashErr && hashErr.message, exists: fs.existsSync(destHashBad) });
+  hashSrv.server.close();
 
   console.log(failed ? 'UPDATE-TEST FAIL' : 'UPDATE-TEST ALL PASS');
   process.exit(failed ? 1 : 0);
