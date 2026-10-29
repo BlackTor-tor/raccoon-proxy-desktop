@@ -31,6 +31,19 @@ function pickSetupAsset(release) {
   return assets.find((a) => /\.exe$/i.test(a.name || '') && /setup/i.test(a.name || '')) || null;
 }
 
+// 便携版:优先文件名含 portable 的 .exe;兼容未改名的 dist 产物(排除 Setup/卸载器后剩下的 exe)
+function pickPortableAsset(release) {
+  const assets = release && Array.isArray(release.assets) ? release.assets : [];
+  const exes = assets.filter((a) => /\.exe$/i.test(a.name || ''));
+  return (
+    exes.find((a) => /portable/i.test(a.name)) ||
+    exes.find((a) => !/setup|uninstall/i.test(a.name)) ||
+    null
+  );
+}
+
+const ASSET_PICKERS = { setup: pickSetupAsset, portable: pickPortableAsset };
+
 function readJson(url, depth = 0) {
   if (depth > 5) return Promise.reject(new Error('重定向次数过多'));
   return new Promise((resolve, reject) => {
@@ -49,15 +62,20 @@ function readJson(url, depth = 0) {
   });
 }
 
-async function checkForUpdate({ currentVersion, apiUrl } = {}) {
+async function checkForUpdate({ currentVersion, apiUrl, variant } = {}) {
   const url = apiUrl || `https://api.github.com/repos/${REPO}/releases/latest`;
   const release = await readJson(url);
   const latest = String(release.tag_name || '').trim().replace(/^v/i, '');
-  const asset = pickSetupAsset(release);
+  const want = variant === 'portable' ? 'portable' : 'setup';
+  const pick = ASSET_PICKERS[want];
+  const primary = pick(release);
+  const other = want === 'portable' ? pickSetupAsset(release) : pickPortableAsset(release);
+  const asset = primary || other; // 对应形态缺失时回退另一种,避免完全无法更新
   return {
     updateAvailable: !!asset && compareVersions(latest, currentVersion) > 0,
     current: currentVersion,
     latest,
+    variant: primary ? want : want === 'setup' ? 'portable' : 'setup',
     downloadUrl: asset ? asset.browser_download_url : null,
     size: asset ? Number(asset.size) || 0 : 0,
     pageUrl: RELEASES_PAGE,
@@ -105,4 +123,4 @@ async function downloadFile({ url, destFile, onProgress, waitMs } = {}) {
   throw err;
 }
 
-module.exports = { REPO, RELEASES_PAGE, MAX_RETRIES, compareVersions, pickSetupAsset, checkForUpdate, downloadFile };
+module.exports = { REPO, RELEASES_PAGE, MAX_RETRIES, compareVersions, pickSetupAsset, pickPortableAsset, checkForUpdate, downloadFile };

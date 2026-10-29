@@ -15,10 +15,19 @@ const assert = (name, cond, extra) => {
 const RELEASE = {
   tag_name: 'v1.5.0',
   assets: [
-    { name: 'RaccoonProxy 1.5.0.exe', browser_download_url: 'http://127.0.0.1:0/portable.exe', size: 90 },
-    { name: 'RaccoonProxy Setup 1.5.0.exe.blockmap', browser_download_url: 'http://127.0.0.1:0/blockmap', size: 1 },
-    { name: 'RaccoonProxy Setup 1.5.0.exe', browser_download_url: 'http://127.0.0.1:0/setup.exe', size: 80 },
+    { name: 'RaccoonProxy-1.5.0-portable.exe', browser_download_url: 'http://127.0.0.1:0/portable.exe', size: 90 },
+    { name: 'RaccoonProxy-Setup-1.5.0.exe.blockmap', browser_download_url: 'http://127.0.0.1:0/blockmap', size: 1 },
+    { name: 'RaccoonProxy-Setup-1.5.0.exe', browser_download_url: 'http://127.0.0.1:0/setup.exe', size: 80 },
     { name: 'latest.yml', browser_download_url: 'http://127.0.0.1:0/latest.yml', size: 1 },
+  ],
+};
+
+// 未改名的 dist 产物(只有 Setup 带 setup 字样,另一个即便携版)
+const RELEASE_UNRENAMED = {
+  tag_name: 'v1.6.0',
+  assets: [
+    { name: 'RaccoonProxy Setup 1.6.0.exe', browser_download_url: 'http://127.0.0.1:0/setup.exe', size: 80 },
+    { name: 'RaccoonProxy 1.6.0.exe', browser_download_url: 'http://127.0.0.1:0/portable.exe', size: 90 },
   ],
 };
 
@@ -27,9 +36,10 @@ function makeServer({ failTimes = 0, redirect = false } = {}) {
   let hits = 0;
   const server = http.createServer((req, res) => {
     hits++;
-    if (req.url === '/releases/latest') {
+    if (req.url === '/releases/latest' || req.url === '/releases/unrenamed' || req.url === '/releases/setup-only') {
+      const release = req.url === '/releases/unrenamed' ? RELEASE_UNRENAMED : req.url === '/releases/setup-only' ? { tag_name: 'v1.5.0', assets: [RELEASE.assets[2]] } : RELEASE;
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      return res.end(JSON.stringify(RELEASE));
+      return res.end(JSON.stringify(release));
     }
     if (redirect && req.url === '/setup.exe') {
       res.writeHead(302, { Location: 'http://127.0.0.1:' + server.address().port + '/real-file' });
@@ -54,16 +64,27 @@ function makeServer({ failTimes = 0, redirect = false } = {}) {
 
   // 2) 安装包挑选:只选 NSIS Setup exe,忽略 portable/blockmap/yml
   const asset = updater.pickSetupAsset(RELEASE);
-  assert('挑选 NSIS Setup 安装包', !!asset && asset.name === 'RaccoonProxy Setup 1.5.0.exe', asset && asset.name);
+  assert('挑选 NSIS Setup 安装包', !!asset && asset.name === 'RaccoonProxy-Setup-1.5.0.exe', asset && asset.name);
   assert('无 Setup 包时返回 null', updater.pickSetupAsset({ assets: [{ name: 'latest.yml' }] }) === null);
+
+  // 2.5) 便携版挑选:优先 portable 命名,兼容未改名产物,Setup 不会误判
+  const portableAsset = updater.pickPortableAsset(RELEASE);
+  assert('挑选便携版 exe', !!portableAsset && portableAsset.name === 'RaccoonProxy-1.5.0-portable.exe', portableAsset && portableAsset.name);
+  const unrenamed = updater.pickPortableAsset(RELEASE_UNRENAMED);
+  assert('未改名产物:排除 Setup 后可识别便携版', !!unrenamed && unrenamed.name === 'RaccoonProxy 1.6.0.exe', unrenamed && unrenamed.name);
+  assert('无便携版资产时返回 null', updater.pickPortableAsset({ assets: [{ name: 'RaccoonProxy Setup 1.5.0.exe' }] }) === null);
 
   // 3) 检查更新:有新版本
   let s = await makeServer();
   const base = 'http://127.0.0.1:' + s.server.address().port;
   const info = await updater.checkForUpdate({ currentVersion: '1.4.1', apiUrl: base + '/releases/latest' });
   assert('检查更新:发现新版本', info.updateAvailable === true && info.latest === '1.5.0', info);
-  assert('检查更新:带上 Setup 包下载地址', info.downloadUrl === RELEASE.assets[2].browser_download_url, info.downloadUrl);
+  assert('检查更新:默认(安装版)带上 Setup 包下载地址', info.downloadUrl === RELEASE.assets[2].browser_download_url && info.variant === 'setup', info);
   assert('检查更新:附带 Releases 页面地址', typeof info.pageUrl === 'string' && info.pageUrl.includes('releases'), info.pageUrl);
+  const infoPortable = await updater.checkForUpdate({ currentVersion: '1.4.1', apiUrl: base + '/releases/latest', variant: 'portable' });
+  assert('检查更新(便携版):下载便携版资产', infoPortable.updateAvailable === true && infoPortable.variant === 'portable' && infoPortable.downloadUrl === RELEASE.assets[0].browser_download_url, infoPortable);
+  const infoFallback = await updater.checkForUpdate({ currentVersion: '1.4.1', apiUrl: base + '/releases/setup-only', variant: 'portable' });
+  assert('便携版缺资产时回退 Setup 并标注形态', infoFallback.updateAvailable === true && infoFallback.variant === 'setup' && infoFallback.downloadUrl === RELEASE.assets[2].browser_download_url, infoFallback);
   const same = await updater.checkForUpdate({ currentVersion: '1.5.0', apiUrl: base + '/releases/latest' });
   assert('检查更新:同版本不提示更新', same.updateAvailable === false, same);
   s.server.close();

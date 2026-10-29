@@ -25,6 +25,14 @@ const DEFAULTS = {
   skipVersion: '', // 用户勾选「不再提醒」的版本号,只对该版本静默
 };
 
+// 客户端形态:electron-builder 的 portable 目标运行时会注入 PORTABLE_EXECUTABLE_FILE/DIR,
+// 安装版(NSIS)没有这两个变量。更新时按形态下载对应产物,避免便携版被替换成安装版。
+const IS_PORTABLE = !!(process.env.PORTABLE_EXECUTABLE_FILE || process.env.PORTABLE_EXECUTABLE_DIR);
+const APP_VARIANT = IS_PORTABLE ? 'portable' : 'setup';
+const PORTABLE_DIR = IS_PORTABLE
+  ? path.dirname(process.env.PORTABLE_EXECUTABLE_FILE || process.execPath)
+  : null;
+
 let win = null;
 let tray = null;
 let child = null;
@@ -299,6 +307,7 @@ ipcMain.handle('app:status', () => ({
   upstream: lastUpstream,
   models: lastModels,
   version: app.getVersion(),
+  variant: APP_VARIANT,
   logs: logBuf,
 }));
 
@@ -328,10 +337,11 @@ ipcMain.handle('settings:save', (_e, v) => {
 // ---- 软件更新:检查 / 下载(主进程网络,渲染进程无外网权限) / 安装 / 打开 Releases ----
 let updateDownloading = false;
 let updateFile = null;
+let updateFileVariant = APP_VARIANT; // 实际下载到的资产形态(便携版缺资产时会回退安装包)
 
 ipcMain.handle('update:check', async () => {
   try {
-    const info = await checkForUpdate({ currentVersion: app.getVersion() });
+    const info = await checkForUpdate({ currentVersion: app.getVersion(), variant: APP_VARIANT });
     return { ok: true, ...info };
   } catch (e) {
     return { ok: false, error: String((e && e.message) || e), pageUrl: RELEASES_PAGE };
@@ -345,15 +355,21 @@ ipcMain.handle('update:download', (_e, payload) => {
   if (updateDownloading) return { ok: false, error: '已有下载任务进行中' };
   updateDownloading = true;
   updateFile = null;
-  const destFile = path.join(app.getPath('temp'), `RaccoonProxy-Setup-${latest || 'latest'}.exe`);
-  send('update:progress', { status: 'downloading', received: 0, total: 0 });
-  downloadFile({ url, destFile, onProgress: (p) => send('update:progress', { status: 'downloading', ...p }) })
+  // 以检查结果解析出的资产形态为准(便携版缺资产会回退成安装包)
+  const variant = payload && payload.variant === 'portable' ? 'portable' : 'setup';
+  updateFileVariant = variant;
+  // 便携版下载到便携版 exe 同目录(运行中的 exe 无法自替换,退出后由用户替换/直接运行);
+  // 安装版下载到临时目录后交给 NSIS 安装器。
+  const fileName = variant === 'portable' ? `RaccoonProxy-${latest || 'latest'}-portable.exe` : `RaccoonProxy-Setup-${latest || 'latest'}.exe`;
+  const destFile = variant === 'portable' && PORTABLE_DIR ? path.join(PORTABLE_DIR, fileName) : path.join(app.getPath('temp'), fileName);
+  send('update:progress', { status: 'downloading', received: 0, total: 0, variant });
+  downloadFile({ url, destFile, onProgress: (p) => send('update:progress', { status: 'downloading', ...p, variant }) })
     .then(() => {
       updateFile = destFile;
-      send('update:progress', { status: 'ready', file: destFile, latest });
+      send('update:progress', { status: 'ready', file: destFile, latest, variant });
     })
     .catch((e) => {
-      send('update:progress', { status: 'failed', message: String((e && e.message) || e), pageUrl: RELEASES_PAGE });
+      send('update:progress', { status: 'failed', message: String((e && e.message) || e), pageUrl: RELEASES_PAGE, variant });
     })
     .finally(() => {
       updateDownloading = false;
@@ -362,7 +378,12 @@ ipcMain.handle('update:download', (_e, payload) => {
 });
 
 ipcMain.handle('update:install', async () => {
-  if (!updateFile || !fs.existsSync(updateFile)) return { ok: false, error: '未找到已下载的安装包,请先下载更新' };
+  if (!updateFile || !fs.existsSync(updateFile)) return { ok: false, error: '未找到已下载的更新包,请先下载更新' };
+  if (updateFileVariant === 'portable') {
+    // 便携版不能像安装版那样直接接管:打开所在文件夹,由用户退出后运行新文件
+    shell.showItemInFolder(updateFile);
+    return { ok: true, portable: true, file: updateFile };
+  }
   const err = await shell.openPath(updateFile);
   if (err) return { ok: false, error: err };
   setTimeout(() => app.quit(), 500); // 让安装器接管,退出本应用
@@ -391,9 +412,9 @@ let updateCheckTimer = null;
 
 async function autoCheckUpdate() {
   try {
-    const info = await checkForUpdate({ currentVersion: app.getVersion() });
+    const info = await checkForUpdate({ currentVersion: app.getVersion(), variant: APP_VARIANT });
     if (info.updateAvailable && info.latest && info.latest !== settings.skipVersion) {
-      send('update:available', { latest: info.latest, current: app.getVersion(), downloadUrl: info.downloadUrl });
+      send('update:available', { latest: info.latest, current: app.getVersion(), downloadUrl: info.downloadUrl, variant: info.variant });
     }
   } catch {
     // 后台静默检查失败不打扰用户,设置页手动检查仍可用

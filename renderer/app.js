@@ -12,6 +12,7 @@ const saved = storage.get('preferences', {});
 const state = {
   page: 'dashboard', running: true, busy: false, sending: false,
   theme: storage.get('theme', 'light'),
+  variant: 'setup', // 客户端形态:setup(安装版)/ portable(便携版),由主进程状态同步
   settings: {
     countryCode: typeof saved.countryCode === 'string' && /^\+\d{1,4}$/.test(saved.countryCode) ? saved.countryCode : '+86',
     phone: '', password: '',
@@ -201,9 +202,10 @@ async function saveSettings(event) {
 /* ---------- 软件更新 ---------- */
 
 const RELEASES_PAGE_URL = 'https://github.com/BlackTor-tor/raccoon-proxy-desktop/releases/latest';
-const updateInfo = { latest: '', downloadUrl: '' };
+const updateInfo = { latest: '', downloadUrl: '', variant: 'setup' };
 const fmtMB = (n) => (n / 1048576).toFixed(1) + ' MB';
 const hasBridge = (fn) => !!(bridge && typeof bridge[fn] === 'function');
+const isPortable = () => (updateInfo.variant || state.variant) === 'portable';
 function showUpdateFallback(message) {
   const box = $('update-fallback');
   box.replaceChildren(document.createTextNode(message + ' '));
@@ -229,9 +231,9 @@ async function checkForUpdateUI() {
     const r = await bridge.checkUpdate();
     if (!r || r.ok === false) throw new Error();
     $('update-current').textContent = 'v' + r.current;
-    updateInfo.latest = r.latest; updateInfo.downloadUrl = r.downloadUrl;
+    updateInfo.latest = r.latest; updateInfo.downloadUrl = r.downloadUrl; updateInfo.variant = r.variant === 'portable' ? 'portable' : 'setup';
     if (!r.updateAvailable) $('update-state').textContent = `已是最新版本(v${r.current})`;
-    else { $('update-state').textContent = `发现新版本 v${r.latest},可下载安装包`; $('update-download').hidden = false; }
+    else { $('update-state').textContent = `发现新版本 v${r.latest},可下载${isPortable() ? '便携版' : '安装包'}`; $('update-download').hidden = false; }
   } catch {
     $('update-state').textContent = '无法检查更新,请稍后重试';
     showUpdateFallback('检查更新失败:网络不可达或接口受限。');
@@ -241,21 +243,29 @@ async function downloadUpdateUI() {
   if (!hasBridge('downloadUpdate') || !updateInfo.downloadUrl) return;
   $('update-fallback').hidden = true;
   setUpdateBusy(true);
-  const result = await bridge.downloadUpdate({ url: updateInfo.downloadUrl, latest: updateInfo.latest });
+  const result = await bridge.downloadUpdate({ url: updateInfo.downloadUrl, latest: updateInfo.latest, variant: updateInfo.variant });
   if (!result || result.ok === false) { setUpdateBusy(false); showUpdateFallback('下载未能开始:' + ((result && result.error) || '未知原因')); }
 }
 function handleUpdateProgress(p) {
   if (!p || !p.status) return;
   const progress = $('update-progress');
+  const portable = p.variant === 'portable';
   if (p.status === 'downloading') {
     progress.hidden = false;
-    progress.textContent = p.total ? `正在下载 v${updateInfo.latest}… ${fmtMB(p.received)} / ${fmtMB(p.total)}(${Math.round((p.received / p.total) * 100)}%)` : `正在下载 v${updateInfo.latest}… ${fmtMB(p.received)}`;
+    progress.textContent = p.total ? `正在下载 v${updateInfo.latest}${portable ? ' 便携版' : ''}… ${fmtMB(p.received)} / ${fmtMB(p.total)}(${Math.round((p.received / p.total) * 100)}%)` : `正在下载 v${updateInfo.latest}${portable ? ' 便携版' : ''}… ${fmtMB(p.received)}`;
   } else if (p.status === 'ready') {
     setUpdateBusy(false);
     $('update-download').hidden = true;
-    progress.hidden = false; progress.textContent = '安装包已下载完成,点击「安装并重启」完成升级。';
+    progress.hidden = false;
+    if (portable) {
+      progress.textContent = `便携版已下载完成:${p.file || ''}。退出本应用后运行新文件即可完成升级(可覆盖旧文件)。`;
+      $('update-install').textContent = '打开所在文件夹';
+    } else {
+      progress.textContent = '安装包已下载完成,点击「安装并重启」完成升级。';
+      $('update-install').textContent = '安装并重启';
+    }
     $('update-install').hidden = false;
-    toast('新版本已就绪');
+    toast(portable ? '新版便携版已就绪' : '新版本已就绪');
   } else if (p.status === 'failed') {
     setUpdateBusy(false);
     progress.hidden = true;
@@ -267,6 +277,7 @@ async function installUpdateUI() {
   if (!hasBridge('installUpdate')) return;
   const r = await bridge.installUpdate();
   if (r && r.ok === false) toast(r.error || '安装失败');
+  else if (r && r.portable) toast('新版便携版已下载,退出应用后运行新文件即可');
 }
 
 /* ---------- 官方积分(签到) ---------- */
@@ -341,11 +352,12 @@ async function checkinNow() {
 
 /* ---------- 更新提醒弹窗 ---------- */
 
-const updateModalInfo = { latest: '', downloadUrl: '' };
+const updateModalInfo = { latest: '', downloadUrl: '', variant: 'setup' };
 function showUpdateModal(info) {
   if (!info || !info.latest) return;
   updateModalInfo.latest = info.latest;
   updateModalInfo.downloadUrl = info.downloadUrl || '';
+  updateModalInfo.variant = info.variant === 'portable' ? 'portable' : info.variant === 'setup' ? 'setup' : state.variant === 'portable' ? 'portable' : 'setup';
   $('update-modal-latest').textContent = 'v' + info.latest;
   $('update-modal-current').textContent = 'v' + (info.current || '');
   $('update-modal-skip').checked = false;
@@ -533,7 +545,8 @@ $('update-modal-go').addEventListener('click', () => {
   if (updateModalInfo.downloadUrl) {
     updateInfo.latest = updateModalInfo.latest;
     updateInfo.downloadUrl = updateModalInfo.downloadUrl;
-    $('update-state').textContent = `发现新版本 v${updateModalInfo.latest},开始下载…`;
+    updateInfo.variant = updateModalInfo.variant;
+    $('update-state').textContent = `发现新版本 v${updateModalInfo.latest},开始下载${updateModalInfo.variant === 'portable' ? '便携版' : '安装包'}…`;
     downloadUpdateUI();
   }
 });
@@ -553,7 +566,7 @@ setTheme(state.theme); populateSettings(); updateService(); renderModels(); rend
 refreshPoints(true);
 if (nativeService) {
   $('service-toggle').disabled = true;
-  bridge.getStatus().then(status => { state.running = status.running === true; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) { document.querySelector('.rail-version').textContent = 'v' + status.version; $('update-current').textContent = 'v' + status.version; } $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); refreshPoints(true); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
+  bridge.getStatus().then(status => { state.running = status.running === true; if (status.variant) state.variant = status.variant === 'portable' ? 'portable' : 'setup'; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) { document.querySelector('.rail-version').textContent = 'v' + status.version; $('update-current').textContent = 'v' + status.version; } $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); refreshPoints(true); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
   if (typeof bridge.onLog === 'function') bridge.onLog(entry => addLog(String(entry.message || ''), entry.level || 'info'));
   if (typeof bridge.onState === 'function') bridge.onState(st => { if (st.state === 'error' && st.error) addLog(st.error, 'error'); if (state.busy) return; const running = st.state === 'running'; if (state.running !== running) { state.running = running; updateService(); addLog(running ? '服务已启动' : '服务已停止'); if (running) refreshPoints(true); } });
   if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok) { applyUpstream(h); refreshPoints(); } });
