@@ -27,6 +27,18 @@ const upstream = http.createServer((req, res) => {
     return res.end();
   }
   if (req.url === '/api/points') return json(res, pointsPayload());
+  if (req.url && req.url.startsWith('/api/points/bills')) {
+    return json(res, {
+      ...pointsPayload(),
+      items: [
+        { id: 'u1', kind: 'usage', at: '2026-10-29T14:18:44+08:00', event: 'SenseChat-5', points: -2, prompt: 12, completion: 4, cached: 0, total: 16 },
+        { id: 'b2', kind: 'bill', at: '2026-10-29T00:23:12+08:00', event: '每日积分发放', points: 798, prompt: null, completion: null, cached: null, total: null },
+        { id: 'u3', kind: 'usage', at: '2026-10-28T19:02:01+08:00', event: 'SenseChat-5', points: null, prompt: 1200, completion: 300, cached: 800, total: 1500 },
+      ],
+      nextCursor: null,
+      hasMore: false,
+    });
+  }
   if (req.url === '/api/checkin') {
     const granted = !checkinDone;
     if (granted) {
@@ -83,10 +95,10 @@ app.whenReady().then(async () => {
   // 0.5) UI 优化回归:删「工作台」/「本地配置」文案、设置页滚动容器贴窗口右缘、图标非太阳误绘
   const uiCopy = await run(`(async () => {
     const texts = {};
-    for (const p of ['dashboard', 'settings', 'playground']) {
+    for (const p of ['dashboard', 'points', 'settings', 'playground']) {
       document.querySelector('[data-page="' + p + '"]').click();
       await new Promise(r => setTimeout(r, 100));
-      texts[p] = document.body.textContent;
+      texts[p] = document.getElementById('page-' + p).textContent;
     }
     document.querySelector('[data-page="settings"]').click();
     await new Promise(r => setTimeout(r, 100));
@@ -101,6 +113,8 @@ app.whenReady().then(async () => {
   })()`);
   assert('所有页面不出现「工作台」文字', Object.values(uiCopy.texts).every(t => !t.includes('工作台')));
   assert('设置页不出现「本地配置」文字', !uiCopy.texts.settings.includes('本地配置'));
+  assert('仪表盘不再显示积分块(已移入积分管理)', !uiCopy.texts.dashboard.includes('官方积分'));
+  assert('积分管理页显示官方积分与明细标题', uiCopy.texts.points.includes('官方积分') && uiCopy.texts.points.includes('消耗明细'));
   assert('设置页滚动容器贴住窗口右缘(无悬空滚动条)', uiCopy.scrollerRight >= uiCopy.winW - 2, { scrollerRight: uiCopy.scrollerRight, winW: uiCopy.winW });
   assert('设置页不撑破窗口滚动', uiCopy.bodyRatio <= 1.05, uiCopy.bodyRatio);
   const iconState = await run(`({
@@ -129,19 +143,25 @@ app.whenReady().then(async () => {
   assert('设置页有版本号与检查更新按钮', updateBlock.present === true && /^(v)?\d+\.\d+\.\d+$|^—$/.test(updateBlock.versionText), updateBlock);
   assert('无桥接时检查更新优雅降级并显示 Releases 链接', updateBlock.stateText.includes('无法') && updateBlock.btnReEnabled === true && updateBlock.fallbackShown === true, updateBlock);
 
-  // 0.7) 官方积分:余额/明细渲染 + 手动签到
+  // 0.7) 积分管理:总积分 + 合并明细(token 读取/写入/缓存、变动) + 手动签到
   const pointsBefore = await run(`(async () => {
-    document.querySelector('[data-page="dashboard"]').click();
-    await new Promise(r => setTimeout(r, 200));
+    document.querySelector('[data-page="points"]').click();
+    await new Promise(r => setTimeout(r, 250));
     for (let i = 0; i < 40; i++) { if (document.getElementById('points-available').textContent !== '—') break; await new Promise(r => setTimeout(r, 100)); }
+    const rows = [...document.querySelectorAll('#bills-list tr')].map(tr => [...tr.children].map(td => td.textContent));
     return {
+      pageVisible: getComputedStyle(document.getElementById('page-points')).display !== 'none',
       available: document.getElementById('points-available').textContent,
       breakdown: document.getElementById('points-breakdown').textContent,
+      rows,
       btnDisabled: document.getElementById('checkin-btn').disabled,
       label: document.getElementById('checkin-label').textContent,
     };
   })()`);
-  assert('积分面板显示可用积分与明细', pointsBefore.available === '6,798' && pointsBefore.breakdown.includes('今日 798') && pointsBefore.breakdown.includes('奖励 6,000'), pointsBefore);
+  assert('积分管理页可进入并显示总积分', pointsBefore.pageVisible === true && pointsBefore.available === '6,798' && pointsBefore.breakdown.includes('今日 798') && pointsBefore.breakdown.includes('奖励 6,000'), pointsBefore);
+  assert('明细含 token 读取/写入/缓存与变动列', pointsBefore.rows.length === 3 && pointsBefore.rows[0].length === 6 && pointsBefore.rows[0][2] === '12' && pointsBefore.rows[0][3] === '4' && pointsBefore.rows[0][4] === '0' && pointsBefore.rows[0][5] === '-2', pointsBefore.rows);
+  assert('官方账单行无 token 时显示占位', pointsBefore.rows[1][2] === '—' && pointsBefore.rows[1][3] === '—' && pointsBefore.rows[1][5] === '+798', pointsBefore.rows[1]);
+  assert('未入账请求变动显示占位', pointsBefore.rows[2][2] === '1,200' && pointsBefore.rows[2][3] === '300' && pointsBefore.rows[2][4] === '800' && pointsBefore.rows[2][5] === '—', pointsBefore.rows[2]);
   assert('未签到时签到按钮可用', pointsBefore.btnDisabled === false && pointsBefore.label === '立即签到', pointsBefore);
 
   const afterCheckin = await run(`(async () => {

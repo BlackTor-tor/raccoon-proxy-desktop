@@ -20,6 +20,7 @@ const state = {
     apiKey: '', autoStart: saved.autoStart === true,
   },
   autoStartDraft: false, messages: [], logCount: 4, keyVisible: false, controller: null,
+  pointsAvailable: null,
   conversations: storage.get('conversations', []), currentId: null,
 };
 const bridge = window.raccoonProxy;
@@ -56,12 +57,13 @@ function relTime(ts) {
 /* ---------- 导航 / 主题 ---------- */
 
 function navigate(page) {
-  if (!['dashboard', 'settings', 'playground'].includes(page)) page = 'dashboard';
+  if (!['dashboard', 'points', 'settings', 'playground'].includes(page)) page = 'dashboard';
   state.page = page;
   document.querySelectorAll('.page').forEach(el => el.hidden = el.id !== 'page-' + page);
   document.querySelectorAll('[data-page]').forEach(el => { const active = el.dataset.page === page; el.classList.toggle('active', active); if (active) el.setAttribute('aria-current', 'page'); else el.removeAttribute('aria-current'); });
-  $('breadcrumb-current').textContent = { dashboard: '仪表盘', settings: '设置', playground: '对话调试' }[page];
+  $('breadcrumb-current').textContent = { dashboard: '仪表盘', points: '积分管理', settings: '设置', playground: '对话调试' }[page];
   storage.set('page', page);
+  if (page === 'points') fetchBillsData(false);
 }
 function setTheme(theme) {
   state.theme = theme === 'dark' ? 'dark' : 'light'; document.documentElement.dataset.theme = state.theme;
@@ -293,6 +295,7 @@ function setCheckinIdle() {
 function renderPoints(data) {
   const p = data && data.points;
   if (!p || !Number.isFinite(p.available_points)) return;
+  state.pointsAvailable = p.available_points;
   $('points-available').textContent = fmtNum(p.available_points);
   const parts = [];
   if (Number(p.daily_points) > 0) parts.push('今日 ' + fmtNum(p.daily_points));
@@ -343,11 +346,86 @@ async function checkinNow() {
     renderPoints(data);
     toast(data.granted ? '签到成功,积分已到账' : '今日已签到过,积分都在账户中');
     addLog(data.granted ? '签到成功' + (data.points ? ',可用 ' + fmtNum(data.points.available_points) : '') : '签到:今日已领取过');
+    if (state.page === 'points') fetchBillsData(false);
   } catch {
     toast('签到失败,请检查服务状态');
     addLog('签到失败', 'error');
     setCheckinIdle();
   } finally { checkinBusy = false; }
+}
+
+/* ---------- 积分账单明细 ---------- */
+
+const billsState = { items: [], cursor: null, hasMore: false, loading: false, fetchedAt: 0 };
+
+function fmtBillTime(value) {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value || '').slice(0, 16).replace('T', ' ');
+  const p = (n) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function fmtDelta(points) {
+  const n = Number(points) || 0;
+  return (n > 0 ? '+' : n < 0 ? '-' : '') + fmtNum(Math.abs(n));
+}
+function renderBills() {
+  const tbody = $('bills-list');
+  if (!tbody) return;
+  tbody.replaceChildren();
+  for (const b of billsState.items) {
+    const tr = document.createElement('tr');
+    const time = document.createElement('td'); time.className = 'bill-time'; time.textContent = fmtBillTime(b.at); time.title = b.at;
+    const event = document.createElement('td'); event.className = 'bill-event'; event.textContent = b.event || '—';
+    const tokens = [b.prompt, b.completion, b.cached].map((v) => {
+      const td = document.createElement('td');
+      td.className = 'num';
+      td.textContent = Number.isFinite(v) ? fmtNum(v) : '—';
+      return td;
+    });
+    const delta = document.createElement('td');
+    delta.className = 'num delta' + (b.points > 0 ? ' pos' : b.points < 0 ? ' neg' : '');
+    delta.textContent = Number.isFinite(b.points) ? fmtDelta(b.points) : '—';
+    if (!Number.isFinite(b.points)) delta.title = '账单入账后自动回填';
+    tr.append(time, event, ...tokens, delta);
+    tbody.appendChild(tr);
+  }
+  $('bills-empty').hidden = billsState.items.length > 0;
+  if (!billsState.items.length) $('bills-empty').textContent = state.running ? '暂无记录' : '开启服务后自动获取';
+  $('bills-more').hidden = !billsState.hasMore;
+}
+
+async function fetchBillsData(append = false) {
+  if (billsState.loading) return;
+  billsState.loading = true;
+  $('bills-refresh').disabled = true;
+  $('bills-more').disabled = true;
+  try {
+    const qs = new URLSearchParams({ limit: '50' });
+    if (append && billsState.cursor) qs.set('cursor', billsState.cursor);
+    const r = await fetch(`http://127.0.0.1:${state.settings.port}/api/points/bills?${qs.toString()}`, { headers: pointsHeaders() });
+    const data = r.ok ? await r.json() : null;
+    if (!data || data.ok !== true) throw new Error();
+    billsState.items = append ? billsState.items.concat(Array.isArray(data.items) ? data.items : []) : (Array.isArray(data.items) ? data.items : []);
+    billsState.cursor = data.nextCursor || null;
+    billsState.hasMore = data.hasMore === true;
+    billsState.fetchedAt = Date.now();
+    renderPoints(data);
+    renderBills();
+  } catch {
+    if (!append) {
+      billsState.items = [];
+      billsState.hasMore = false;
+      renderBills();
+      $('bills-empty').hidden = false;
+      $('bills-empty').textContent = state.running ? '暂时无法获取账单,请稍后刷新' : '开启服务后自动获取';
+    } else {
+      toast('加载更多失败,请稍后重试');
+    }
+  } finally {
+    billsState.loading = false;
+    $('bills-refresh').disabled = false;
+    $('bills-more').disabled = false;
+  }
 }
 
 /* ---------- 更新提醒弹窗 ---------- */
@@ -536,6 +614,8 @@ $('update-download').addEventListener('click', downloadUpdateUI);
 $('update-install').addEventListener('click', installUpdateUI);
 if (hasBridge('onUpdateProgress')) bridge.onUpdateProgress(handleUpdateProgress);
 $('checkin-btn').addEventListener('click', checkinNow);
+$('bills-refresh').addEventListener('click', () => fetchBillsData(false));
+$('bills-more').addEventListener('click', () => fetchBillsData(true));
 $('update-modal-later').addEventListener('click', () => {
   if ($('update-modal-skip').checked && updateModalInfo.latest && hasBridge('dismissUpdate')) bridge.dismissUpdate({ latest: updateModalInfo.latest });
   hideUpdateModal();
@@ -568,9 +648,9 @@ setTheme(state.theme); populateSettings(); updateService(); renderModels(); rend
 refreshPoints(true);
 if (nativeService) {
   $('service-toggle').disabled = true;
-  bridge.getStatus().then(status => { state.running = status.running === true; if (status.variant) state.variant = status.variant === 'portable' ? 'portable' : 'setup'; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) { document.querySelector('.rail-version').textContent = 'v' + status.version; $('update-current').textContent = 'v' + status.version; } $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); refreshPoints(true); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
+  bridge.getStatus().then(status => { state.running = status.running === true; if (status.variant) state.variant = status.variant === 'portable' ? 'portable' : 'setup'; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) { document.querySelector('.rail-version').textContent = 'v' + status.version; $('update-current').textContent = 'v' + status.version; } $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); refreshPoints(true); if (state.page === 'points') fetchBillsData(false); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
   if (typeof bridge.onLog === 'function') bridge.onLog(entry => addLog(String(entry.message || ''), entry.level || 'info'));
-  if (typeof bridge.onState === 'function') bridge.onState(st => { if (st.state === 'error' && st.error) addLog(st.error, 'error'); if (state.busy) return; const running = st.state === 'running'; if (state.running !== running) { state.running = running; updateService(); addLog(running ? '服务已启动' : '服务已停止'); if (running) refreshPoints(true); } });
-  if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok) { applyUpstream(h); refreshPoints(); } });
+  if (typeof bridge.onState === 'function') bridge.onState(st => { if (st.state === 'error' && st.error) addLog(st.error, 'error'); if (state.busy) return; const running = st.state === 'running'; if (state.running !== running) { state.running = running; updateService(); addLog(running ? '服务已启动' : '服务已停止'); if (running) { refreshPoints(true); if (state.page === 'points') fetchBillsData(false); } } });
+  if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok) { applyUpstream(h); refreshPoints(); if (state.page === 'points' && Date.now() - billsState.fetchedAt > 30000) fetchBillsData(false); } });
   $('credentials-note').textContent = '账户凭据交由桌面应用处理；主题、端口与启动偏好保存在本机。';
 } else if (state.settings.autoStart) addLog('演示：已按启动偏好开启服务');

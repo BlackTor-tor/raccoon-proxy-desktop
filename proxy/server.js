@@ -23,6 +23,7 @@ const CATALOG_URL_PATH = '/api/web/llm/v2/model_catalog';
 const CATALOG_TTL_MS = 10 * 60 * 1000;
 const UPSTREAM_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const POINTS_URL_PATH = '/api/web/points/v1/balance';
+const BILLS_URL_PATH = '/api/web/points/v2/bills';
 const GRANT_URL_PATH = '/api/web/desktop/v1/login/points/grant';
 const CHECKIN_FILE = process.env.XHX_CHECKIN_FILE || path.join(__dirname, '.checkin');
 const CHECKIN_INTERVAL_MS = 30 * 60 * 1000; // 签到失败后每 30 分钟重试,成功后当天不再请求
@@ -219,6 +220,150 @@ async function doCheckin() {
   return { granted, popup: json?.data?.popup || null };
 }
 
+// 官方积分账单(消耗/发放流水):GET /api/web/points/v2/bills,游标分页
+async function fetchBills(limit = 50, cursor = null) {
+  const qs = new URLSearchParams({ 'paging.limit': String(limit), type: 'all' });
+  if (cursor) qs.set('cursor', cursor);
+  const json = await authedJson('GET', `${BILLS_URL_PATH}?${qs.toString()}`);
+  if (json?.code !== 0) throw new Error(`points bills: code=${json?.code} ${json?.message || ''}`);
+  const data = json.data || {};
+  const items = Array.isArray(data.items) ? data.items : [];
+  const nextCursor = data.next_cursor ?? data.cursor ?? data.paging?.next_cursor ?? data.paging?.cursor ?? null;
+  const hasMore = Boolean((data.has_more ?? data.paging?.has_more ?? Boolean(nextCursor)) && nextCursor);
+  return { items: items.map(mapBill), nextCursor, hasMore };
+}
+
+function mapBill(item) {
+  return {
+    id: String(item?.bill_id || ''),
+    at: String(item?.created_at || ''),
+    event: String(item?.event_name || ''),
+    points: Number(item?.points) || 0,
+    bizType: String(item?.biz_type || ''),
+    client: String(item?.client_type || ''),
+  };
+}
+
+// ---- 本地请求 usage 记录:与官方账单合并,给每笔请求补上 token 读取/写入/缓存 ----
+const USAGE_FILE = process.env.XHX_USAGE_FILE || path.join(__dirname, '.usage.json');
+const USAGE_LIMIT = 300;
+const USAGE_CAPTURE_LIMIT = 4 * 1024 * 1024;
+let usageLog = [];
+try {
+  const j = JSON.parse(fs.readFileSync(USAGE_FILE, 'utf8'));
+  if (Array.isArray(j)) usageLog = j.slice(0, USAGE_LIMIT);
+} catch {}
+
+function saveUsageLog() {
+  try {
+    fs.writeFileSync(USAGE_FILE, JSON.stringify(usageLog.slice(0, USAGE_LIMIT)), 'utf8');
+  } catch {}
+}
+
+// 从上游响应里取 usage(流式取最后一个带 usage 的 SSE 帧)
+function extractUsage(contentType, text) {
+  if (!text) return null;
+  if (!/event-stream/i.test(contentType || '')) {
+    try {
+      const j = JSON.parse(text);
+      return j?.usage || null;
+    } catch {
+      return null;
+    }
+  }
+  const frames = text.split('\n').filter((l) => l.startsWith('data:'));
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const raw = frames[i].slice(5).trim();
+    if (!raw || raw === '[DONE]') continue;
+    try {
+      const j = JSON.parse(raw);
+      if (j?.usage) return j.usage;
+    } catch {}
+  }
+  return null;
+}
+
+function recordUsage({ model, usage, at }) {
+  const prompt = Number(usage?.prompt_tokens) || 0;
+  const completion = Number(usage?.completion_tokens) || 0;
+  const cached = Number(usage?.prompt_tokens_details?.cached_tokens ?? usage?.cache_read_input_tokens) || 0;
+  const rec = {
+    id: 'u' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7),
+    at: new Date(at || Date.now()).toISOString(),
+    model: String(model || ''),
+    prompt,
+    completion,
+    cached,
+    total: Number(usage?.total_tokens) || prompt + completion,
+    points: null,
+    billId: null,
+  };
+  usageLog.unshift(rec);
+  if (usageLog.length > USAGE_LIMIT) usageLog.length = USAGE_LIMIT;
+  saveUsageLog();
+}
+
+// 把未匹配的本地请求与官方消耗账单按时间就近配对(账单通常 1~3 秒内生成)
+function reconcileUsage(billItems, minAgeMs = 5000) {
+  const used = new Set(usageLog.map((r) => r.billId).filter(Boolean));
+  const now = Date.now();
+  let changed = false;
+  for (const rec of usageLog) {
+    if (rec.billId) continue;
+    const t = Date.parse(rec.at);
+    if (!Number.isFinite(t) || now - t < minAgeMs) continue;
+    let best = null;
+    let bestDiff = Infinity;
+    for (const b of billItems) {
+      if (b.points >= 0 || used.has(b.id)) continue;
+      const diff = Math.abs((Date.parse(b.at) || 0) - t);
+      if (diff <= 10000 && diff < bestDiff) {
+        best = b;
+        bestDiff = diff;
+      }
+    }
+    if (best) {
+      rec.billId = best.id;
+      rec.points = best.points;
+      used.add(best.id);
+      changed = true;
+    }
+  }
+  if (changed) saveUsageLog();
+}
+
+// 合并视图:本地 usage 行(带 token)优先,其余账单行照常展示
+function buildBillsView(billItems) {
+  reconcileUsage(billItems);
+  const byBill = new Map();
+  for (const rec of usageLog) if (rec.billId) byBill.set(rec.billId, rec);
+  const rows = [];
+  const seen = new Set();
+  let oldest = null;
+  for (const b of billItems) {
+    const t = Date.parse(b.at) || 0;
+    if (oldest === null || t < oldest) oldest = t;
+    const u = byBill.get(b.id);
+    if (u) {
+      rows.push(usageRow(u));
+      seen.add(u.id);
+    } else {
+      rows.push({ id: b.id, kind: 'bill', at: b.at, event: b.event, points: b.points, prompt: null, completion: null, cached: null, total: null });
+    }
+  }
+  for (const rec of usageLog) {
+    if (rec.billId || seen.has(rec.id)) continue;
+    if (oldest !== null && (Date.parse(rec.at) || 0) < oldest) continue; // 更早的等「加载更多」后再出现
+    rows.push(usageRow(rec));
+  }
+  rows.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
+  return rows;
+}
+
+function usageRow(rec) {
+  return { id: rec.id, kind: 'usage', at: rec.at, event: rec.model, points: Number.isFinite(rec.points) ? rec.points : null, prompt: rec.prompt, completion: rec.completion, cached: rec.cached, total: rec.total };
+}
+
 async function autoCheckin(reason) {
   const today = localDateStr();
   if (checkinState.date === today) return;
@@ -395,7 +540,8 @@ async function proxyChat(req, res) {
   while (true) {
     const token = await getToken();
     const started = Date.now();
-    upstream = await request('POST', CHAT_URL_PATH, { body: jsonBody, token });
+    // 上游对复用 keep-alive 连接的流式响应不计费(实测),强制新连接确保每笔对话都入账
+    upstream = await request('POST', CHAT_URL_PATH, { body: jsonBody, token, headers: { Connection: 'close' } });
     log(`upstream ${upstream.statusCode} in ${Date.now() - started}ms (stream=${isStream}, retry502=${retriedBadGateway}, model=${payload.model})`);
     // 上游偶发 502(网关瞬时故障)-> 小退避重试
     if (upstream.statusCode === 502 && retriedBadGateway < 2) {
@@ -422,6 +568,20 @@ async function proxyChat(req, res) {
   const ct = upstream.headers['content-type'];
   if (ct) headers['Content-Type'] = ct;
   res.writeHead(status, headers);
+  // 边转发边留存响应体,结束后解析 usage(token 读取/写入/缓存)记入本地流水
+  const captured = [];
+  let capturedSize = 0;
+  upstream.on('data', (chunk) => {
+    if (capturedSize < USAGE_CAPTURE_LIMIT) {
+      captured.push(chunk);
+      capturedSize += chunk.length;
+    }
+  });
+  upstream.on('end', () => {
+    if (status < 200 || status >= 300) return;
+    const usage = extractUsage(ct, Buffer.concat(captured).toString('utf8'));
+    if (usage) recordUsage({ model: payload.model, usage });
+  });
   upstream.pipe(res);
   upstream.on('error', () => res.destroy());
 }
@@ -474,6 +634,14 @@ const server = http.createServer(async (req, res) => {
     if (route === 'GET /api/points') {
       const points = await fetchPoints();
       return sendJson(res, 200, { ok: true, points, checkin: { date: checkinState.date, today: localDateStr(), lastResult: checkinState.lastResult } });
+    }
+
+    if (route === 'GET /api/points/bills') {
+      const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50));
+      const cursor = url.searchParams.get('cursor') || null;
+      const bills = await fetchBills(limit, cursor);
+      const points = await fetchPoints().catch(() => null);
+      return sendJson(res, 200, { ok: true, items: buildBillsView(bills.items), nextCursor: bills.nextCursor, hasMore: bills.hasMore, points, checkin: { date: checkinState.date, today: localDateStr(), lastResult: checkinState.lastResult } });
     }
 
     if (route === 'POST /api/checkin') {

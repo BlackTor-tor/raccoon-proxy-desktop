@@ -27,6 +27,7 @@
 <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696a10.75 10.75 0 0 1 19.876 0a1 1 0 0 1 0 .696a10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></symbol>
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14m-7-7v14"/></symbol>
 <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9a9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5m4-1v5l4 2"/></symbol>
+<symbol id="i-wallet" viewBox="0 0 24 24"><path d="M19 7V4a1 1 0 0 0-1-1H5a2 2 0 0 0 0 4h15a1 1 0 0 1 1 1v4h-3a2 2 0 0 0 0 4h3a1 1 0 0 0 1-1v-2a1 1 0 0 0-1-1"/><path d="M3 5v14a2 2 0 0 0 2 2h15a1 1 0 0 0 1-1v-4"/></symbol>
 <symbol id="raccoon" viewBox="0 0 256 256"><rect width="256" height="256" rx="56" fill="#2f7d4f"/><path d="M55 111 45 55Q44 43 57 48l50 27m42 0 50-27q13-5 12 7l-10 56" fill="#1c2b22"/><path d="m59 62 7 40 28-21Zm138 0-35 19 28 21Z" fill="#7fbf95"/><path d="M128 66c-46 0-82 30-87 72-3 28 29 62 87 80 58-18 90-52 87-80-5-42-41-72-87-72Z" fill="#eef3ef"/><path d="M48 125c17-15 35-20 52-11l28 20 28-20c17-9 35-4 52 11l-8 35-46 15-26-26-26 26-46-15Z" fill="#1c2b22"/><ellipse cx="88" cy="140" rx="10" ry="12" fill="#f7faf7"/><ellipse cx="168" cy="140" rx="10" ry="12" fill="#f7faf7"/><path d="M109 170q19-13 38 0-2 16-19 22-17-6-19-22Z" fill="#1c2b22"/><path d="M128 189v11m-12-1q12 9 24 0" fill="none" stroke="#1c2b22" stroke-width="6" stroke-linecap="round"/></symbol>
 </defs></svg>
 
@@ -34,11 +35,12 @@
   <nav class="rail">
     <svg class="logo" role="img" aria-label="RaccoonProxy"><use href="#raccoon"/></svg>
     <button type="button" class="active" data-page="dashboard" aria-current="page" title="仪表盘" aria-label="仪表盘"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg></button>
+    <button type="button" data-page="points" title="积分管理" aria-label="积分管理"><svg class="icon" aria-hidden="true"><use href="#i-wallet"/></svg></button>
     <button type="button" data-page="settings" title="设置" aria-label="设置"><svg class="icon" aria-hidden="true"><use href="#i-settings"/></svg></button>
     <button type="button" data-page="playground" title="对话调试" aria-label="对话调试"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg></button>
     <span class="spacer"></span>
     <button type="button" id="theme-toggle" title="切换深浅主题" aria-label="切换深浅主题"><svg class="icon" aria-hidden="true"><use id="theme-icon" href="#i-moon"/></svg></button>
-    <span class="rail-version mono">v1.7</span>
+    <span class="rail-version mono">v1.8</span>
   </nav>
 
   <div class="main">
@@ -69,19 +71,6 @@
             </div>
             <p class="hint" id="key-hint">若工具要求必填,可填入任意非空占位值</p>
           </section>
-          <section class="block" aria-labelledby="points-title">
-            <h2 id="points-title">官方积分 <span class="sub">每日签到自动领取,与官方客户端一致</span></h2>
-            <div class="points-row">
-              <div class="points-main">
-                <div class="points-value"><span class="num" id="points-available">—</span><span class="points-unit">可用积分</span></div>
-                <div class="points-breakdown" id="points-breakdown">待服务启动后获取</div>
-              </div>
-              <div class="points-action">
-                <button type="button" class="btn ghost" id="checkin-btn"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span id="checkin-label">立即签到</span></button>
-                <p class="hint" id="checkin-state">—</p>
-              </div>
-            </div>
-          </section>
           <section class="block grow">
             <h2>可用模型 <span class="sub" id="models-note">来自上游实时目录,点击行复制模型 ID</span></h2>
             <table class="models">
@@ -98,6 +87,38 @@
           </section>
           <p class="meta">服务仅监听 127.0.0.1 · 凭据保存在本机</p>
         </aside>
+      </div>
+    </section>
+
+    <!-- ============ 积分管理 ============ -->
+    <section class="page" id="page-points" aria-labelledby="points-title" hidden>
+      <header class="top">
+        <h1 id="points-title">积分管理</h1>
+        <button type="button" class="btn ghost" id="bills-refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+      </header>
+      <div class="content points-content">
+        <section class="block" aria-labelledby="points-balance-title">
+          <h2 id="points-balance-title">官方积分 <span class="sub">每日签到自动领取,与官方客户端一致</span></h2>
+          <div class="points-row">
+            <div class="points-main">
+              <div class="points-value"><span class="num" id="points-available">—</span><span class="points-unit">可用积分</span></div>
+              <div class="points-breakdown" id="points-breakdown">待服务启动后获取</div>
+            </div>
+            <div class="points-action">
+              <button type="button" class="btn ghost" id="checkin-btn"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span id="checkin-label">立即签到</span></button>
+              <p class="hint" id="checkin-state">—</p>
+            </div>
+          </div>
+        </section>
+        <section class="block" aria-labelledby="bills-title">
+          <h2 id="bills-title">消耗明细 <span class="sub">来自官方账单</span></h2>
+          <table class="bills">
+            <thead><tr><th>时间</th><th>事项</th><th class="num">读取</th><th class="num">写入</th><th class="num">缓存</th><th class="num">变动</th></tr></thead>
+            <tbody id="bills-list"></tbody>
+          </table>
+          <p class="bills-empty" id="bills-empty" hidden>暂无记录</p>
+          <div class="bills-foot"><button type="button" class="text-button" id="bills-more" hidden>加载更多</button></div>
+        </section>
       </div>
     </section>
 
