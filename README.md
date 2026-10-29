@@ -16,7 +16,8 @@
 - **实时日志**:请求状态、耗时、上游错误实时可见
   - **Playground**:内置对话测试,流式输出,装完即可自检;**思考程度**可选(默认/关闭/低/中/高),模型的思考过程实时折叠展示;回答流式逐字渲染,等待/思考/生成全程有实时状态提示;**历史对话**子菜单自动保存最近 50 段对话(本地存储),可一键恢复、删除(支持撤销)
 - **本地鉴权(可选)**:给本地端口加一道 Bearer API Key
-- **软件更新**:设置页一键检查并下载最新版安装包(网络不佳自动重试 3 次,仍失败可一键跳转 Releases 手动下载)
+- **每日签到(官方积分)**:服务启动自动领取官方每日登录奖励积分(与官方客户端一致,当日已领则自动跳过),仪表盘实时显示可用积分与明细,可手动补签;接口 `GET /api/points`、`POST /api/checkin`
+- **软件更新**:设置页一键检查并下载最新版安装包(网络不佳自动重试 3 次,仍失败可一键跳转 Releases 手动下载);启动后自动检查新版本,发现更新弹窗提醒是否更新,可勾选「不再提醒这个版本」(仅对该版本静默,手动检查不受影响)
 
 ## 快速开始
 
@@ -60,7 +61,7 @@ npm run dist     # 打包 NSIS 安装包 + 便携版(输出在 dist/)
 XHX_PHONE=... XHX_PASSWORD=... node proxy/server.js   # 默认 http://127.0.0.1:8317
 ```
 
-环境变量:`PORT` / `HOST` / `XHX_PHONE` / `XHX_PASSWORD` / `XHX_NATION_CODE` / `PROXY_API_KEY` / `XHX_TOKEN_FILE`。
+环境变量:`PORT` / `HOST` / `XHX_PHONE` / `XHX_PASSWORD` / `XHX_NATION_CODE` / `PROXY_API_KEY` / `XHX_TOKEN_FILE` / `XHX_CHECKIN_FILE`(签到状态文件)/ `XHX_CLIENT_PLATFORM`(签到上报的客户端平台标识,默认 `desktop-windows`)。
 
 ## 目录结构
 

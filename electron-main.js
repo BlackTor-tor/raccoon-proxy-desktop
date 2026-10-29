@@ -12,6 +12,8 @@ const { checkForUpdate, downloadFile, RELEASES_PAGE } = require('./updater');
 //   checkUpdate() -> {ok, updateAvailable, current, latest, downloadUrl, pageUrl}
 //   downloadUpdate({url, latest}) -> {ok, started}   进度经 onUpdateProgress 推送
 //   installUpdate() -> {ok} / openReleases() -> {ok}
+//   dismissUpdate({latest}) -> {ok}  记住「不再提醒这个版本」
+//   onUpdateAvailable(cb) cb({latest, current})  后台发现新版本时推送(渲染层弹窗)
 //   onLog(cb) cb({message, level}) / onState(cb) cb({state, error}) / onHealth(cb) cb({ok, tokenExpiresAt})
 const DEFAULTS = {
   phone: '',
@@ -20,6 +22,7 @@ const DEFAULTS = {
   port: 8317,
   apiKey: '',
   autoStart: true,
+  skipVersion: '', // 用户勾选「不再提醒」的版本号,只对该版本静默
 };
 
 let win = null;
@@ -92,6 +95,7 @@ function startProxy() {
     XHX_NATION_CODE: settings.countryCode || '+86',
     PROXY_API_KEY: settings.apiKey || '',
     XHX_TOKEN_FILE: path.join(app.getPath('userData'), 'token.cache'),
+    XHX_CHECKIN_FILE: path.join(app.getPath('userData'), 'checkin.json'),
   };
   try {
     child = fork(path.join(__dirname, 'proxy', 'server.js'), [], { env, silent: true });
@@ -274,6 +278,7 @@ if (!gotLock) {
     tray.on('click', showWindow);
     updateTray();
     if (settings.autoStart) startProxy();
+    scheduleUpdateChecks();
   });
 
   app.on('before-quit', () => {
@@ -304,6 +309,7 @@ ipcMain.handle('service:stop', async () => {
 });
 
 // 只负责持久化;是否重启服务由渲染端按运行状态编排(stop -> save -> start)
+// skipVersion 不是表单字段,原地保留,避免保存设置时把「不再提醒」抹掉
 ipcMain.handle('settings:save', (_e, v) => {
   settings = {
     countryCode: /^\+\d{1,4}$/.test(String(v.countryCode || '').trim()) ? String(v.countryCode).trim() : '+86',
@@ -312,6 +318,7 @@ ipcMain.handle('settings:save', (_e, v) => {
     port: Math.min(65535, Math.max(1024, Math.floor(Number(v.port)) || 8317)),
     apiKey: String(v.apiKey ?? '').trim(),
     autoStart: v.autoStart === true,
+    skipVersion: typeof settings.skipVersion === 'string' ? settings.skipVersion : '',
   };
   persistSettings();
   updateTray();
@@ -366,3 +373,37 @@ ipcMain.handle('update:open-page', async () => {
   await shell.openExternal(RELEASES_PAGE);
   return { ok: true };
 });
+
+// 「不再提醒这个版本」:记住版本号,后续后台检查对该版本静默(手动检查不受影响)
+ipcMain.handle('update:dismiss', (_e, payload) => {
+  const ver = String((payload && payload.latest) || '').replace(/[^\w.-]/g, '');
+  if (ver) {
+    settings.skipVersion = ver;
+    persistSettings();
+  }
+  return { ok: true };
+});
+
+// ---- 后台自动检查更新:启动后 8 秒一次,之后每 4 小时;命中未静默的新版本即推给渲染层弹窗 ----
+const UPDATE_CHECK_DELAY_MS = 8000;
+const UPDATE_CHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+let updateCheckTimer = null;
+
+async function autoCheckUpdate() {
+  try {
+    const info = await checkForUpdate({ currentVersion: app.getVersion() });
+    if (info.updateAvailable && info.latest && info.latest !== settings.skipVersion) {
+      send('update:available', { latest: info.latest, current: app.getVersion(), downloadUrl: info.downloadUrl });
+    }
+  } catch {
+    // 后台静默检查失败不打扰用户,设置页手动检查仍可用
+  }
+}
+
+function scheduleUpdateChecks() {
+  clearTimeout(updateCheckTimer);
+  updateCheckTimer = setTimeout(() => {
+    autoCheckUpdate();
+    setInterval(autoCheckUpdate, UPDATE_CHECK_INTERVAL_MS);
+  }, UPDATE_CHECK_DELAY_MS);
+}

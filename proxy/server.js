@@ -22,6 +22,11 @@ const CHAT_URL_PATH = '/api/web/llm/v2/chat/completions';
 const CATALOG_URL_PATH = '/api/web/llm/v2/model_catalog';
 const CATALOG_TTL_MS = 10 * 60 * 1000;
 const UPSTREAM_CHECK_INTERVAL_MS = 5 * 60 * 1000;
+const POINTS_URL_PATH = '/api/web/points/v1/balance';
+const GRANT_URL_PATH = '/api/web/desktop/v1/login/points/grant';
+const CHECKIN_FILE = process.env.XHX_CHECKIN_FILE || path.join(__dirname, '.checkin');
+const CHECKIN_INTERVAL_MS = 30 * 60 * 1000; // 签到失败后每 30 分钟重试,成功后当天不再请求
+const CLIENT_PLATFORM = process.env.XHX_CLIENT_PLATFORM || 'desktop-windows';
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
 
@@ -48,7 +53,7 @@ function encryptCredential(plain) {
   return Buffer.concat([iv, ct]).toString('base64');
 }
 
-function request(method, urlPath, { body, token, timeoutMs = 120000 } = {}) {
+function request(method, urlPath, { body, token, headers: extraHeaders, timeoutMs = 120000 } = {}) {
   return new Promise((resolve, reject) => {
     const headers = {
       'User-Agent': USER_AGENT,
@@ -56,6 +61,7 @@ function request(method, urlPath, { body, token, timeoutMs = 120000 } = {}) {
       'Accept-Language': 'zh-CN,zh;q=0.9',
       Origin: `https://${UPSTREAM_HOST}`,
       Referer: `https://${UPSTREAM_HOST}/login`,
+      ...extraHeaders,
     };
     if (body !== undefined) {
       headers['Content-Type'] = 'application/json';
@@ -158,6 +164,78 @@ async function getToken(forceRefresh = false) {
       });
   }
   return tokenPromise;
+}
+
+// ---- 官方每日签到(桌面端登录奖励)与积分余额 ----
+// 签到即官方客户端每次启动调用的 login/points/grant,服务端按自然日去重;
+// granted=false 表示今日已由官方客户端领取,同样视为完成。
+function localDateStr(d = new Date()) {
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+let checkinState = { date: null, lastResult: '' };
+try {
+  const j = JSON.parse(fs.readFileSync(CHECKIN_FILE, 'utf8'));
+  if (j && typeof j.date === 'string') checkinState.date = j.date;
+} catch {}
+
+function saveCheckinState() {
+  try {
+    fs.writeFileSync(CHECKIN_FILE, JSON.stringify({ date: checkinState.date, at: new Date().toISOString() }), 'utf8');
+  } catch {}
+}
+
+// 带 token 且 401/403 自动重登一次的 JSON 请求
+async function authedJson(method, urlPath, { headers = {}, timeoutMs = 20000 } = {}) {
+  let token = await getToken();
+  let res = await request(method, urlPath, { body: method === 'POST' ? '{}' : undefined, token, headers, timeoutMs });
+  if ([401, 403].includes(res.statusCode)) {
+    token = await getToken(true);
+    res = await request(method, urlPath, { body: method === 'POST' ? '{}' : undefined, token, headers, timeoutMs });
+  }
+  const text = await readJsonBody(res);
+  if (res.statusCode !== 200) throw new Error(`${urlPath} HTTP ${res.statusCode}: ${text.slice(0, 200)}`);
+  return JSON.parse(text);
+}
+
+let pointsCache = { at: 0, data: null };
+
+async function fetchPoints(force = false) {
+  if (!force && pointsCache.data && Date.now() - pointsCache.at < 30000) return pointsCache.data;
+  const json = await authedJson('GET', POINTS_URL_PATH);
+  if (json?.code !== 0 || !json.data) throw new Error(`points balance: unexpected response ${JSON.stringify(json).slice(0, 120)}`);
+  pointsCache = { at: Date.now(), data: json.data };
+  return pointsCache.data;
+}
+
+async function doCheckin() {
+  const json = await authedJson('POST', GRANT_URL_PATH, { headers: { 'X-Client-Platform': CLIENT_PLATFORM } });
+  if (json?.code !== 0) throw new Error(`points grant: code=${json?.code} ${json?.message || ''}`);
+  const granted = json?.data?.granted === true;
+  if (granted) pointsCache = { at: 0, data: null }; // 余额变化,失效缓存
+  checkinState.date = localDateStr();
+  saveCheckinState();
+  return { granted, popup: json?.data?.popup || null };
+}
+
+async function autoCheckin(reason) {
+  const today = localDateStr();
+  if (checkinState.date === today) return;
+  try {
+    const { granted, popup } = await doCheckin();
+    checkinState.lastResult = granted ? `granted(${reason})` : 'already-granted';
+    if (granted) {
+      const b = await fetchPoints(true).catch(() => null);
+      log(`每日积分已签到入账${b ? `:可用 ${b.available_points}` : ''}`);
+      if (popup) log(`签到弹窗: ${JSON.stringify(popup).slice(0, 200)}`);
+    } else {
+      log('今日积分已领取过(官方侧已去重),跳过签到');
+    }
+  } catch (e) {
+    checkinState.lastResult = `failed: ${String(e?.message || e).slice(0, 160)}`;
+    log(`每日积分签到失败(${CHECKIN_INTERVAL_MS / 60000} 分钟后重试): ${e.message}`);
+  }
 }
 
 // 目录不可用时的兜底模型名(上游对未知名称按默认模型路由)
@@ -393,6 +471,18 @@ const server = http.createServer(async (req, res) => {
       return sendJson(res, 200, out);
     }
 
+    if (route === 'GET /api/points') {
+      const points = await fetchPoints();
+      return sendJson(res, 200, { ok: true, points, checkin: { date: checkinState.date, today: localDateStr(), lastResult: checkinState.lastResult } });
+    }
+
+    if (route === 'POST /api/checkin') {
+      const { granted, popup } = await doCheckin();
+      const points = await fetchPoints(true).catch(() => null);
+      checkinState.lastResult = granted ? 'granted(manual)' : 'already-granted';
+      return sendJson(res, 200, { ok: true, granted, popup, points, checkin: { date: checkinState.date, today: localDateStr(), lastResult: checkinState.lastResult } });
+    }
+
     return sendJson(res, 404, { error: { message: `unknown route ${route}`, type: 'invalid_request_error' } });
   } catch (e) {
     log(`error: ${String(e?.message || e)}`);
@@ -417,6 +507,9 @@ server.listen(PORT, HOST, async () => {
     const token = await getToken();
     const exp = jwtExp(token);
     log(`token ready (expires ${isFiniteNum(exp) ? new Date(exp).toISOString() : '?'})`);
+    // 启动即尝试当日签到(与官方客户端登录领奖一致);之后每 30 分钟补一次,当日成功则跳过
+    autoCheckin('startup').catch(() => {});
+    setInterval(() => autoCheckin('timer').catch(() => {}), CHECKIN_INTERVAL_MS);
   } catch (e) {
     console.error(`[raccoon-proxy] initial login failed: ${e.message}`);
   }

@@ -38,7 +38,7 @@
     <button type="button" data-page="playground" title="对话调试" aria-label="对话调试"><svg class="icon" aria-hidden="true"><use href="#i-chat"/></svg></button>
     <span class="spacer"></span>
     <button type="button" id="theme-toggle" title="切换深浅主题" aria-label="切换深浅主题"><svg class="icon" aria-hidden="true"><use id="theme-icon" href="#i-moon"/></svg></button>
-    <span class="rail-version mono">v1.5</span>
+    <span class="rail-version mono">v1.6</span>
   </nav>
 
   <div class="main">
@@ -68,6 +68,19 @@
               <span class="k">API Key</span><span class="v mono" id="api-key-display">未设置 · 无需鉴权</span><button type="button" class="icon-ghost" id="reveal-key" aria-label="显示 API Key" title="显示 API Key" hidden><svg class="icon" aria-hidden="true"><use href="#i-eye"/></svg></button><button type="button" class="copy" id="copy-api-key">复制</button>
             </div>
             <p class="hint" id="key-hint">若工具要求必填,可填入任意非空占位值</p>
+          </section>
+          <section class="block" aria-labelledby="points-title">
+            <h2 id="points-title">官方积分 <span class="sub">每日签到自动领取,与官方客户端一致</span></h2>
+            <div class="points-row">
+              <div class="points-main">
+                <div class="points-value"><span class="num" id="points-available">—</span><span class="points-unit">可用积分</span></div>
+                <div class="points-breakdown" id="points-breakdown">待服务启动后获取</div>
+              </div>
+              <div class="points-action">
+                <button type="button" class="btn ghost" id="checkin-btn"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span id="checkin-label">立即签到</span></button>
+                <p class="hint" id="checkin-state">—</p>
+              </div>
+            </div>
           </section>
           <section class="block grow">
             <h2>可用模型 <span class="sub" id="models-note">来自上游实时目录,点击行复制模型 ID</span></h2>
@@ -222,6 +235,17 @@
 </div>
 
 <span id="breadcrumb-current" class="sr-only" aria-hidden="true"></span>
+<div class="modal-mask" id="update-modal" role="dialog" aria-modal="true" aria-labelledby="update-modal-title" hidden>
+  <div class="modal">
+    <h2 id="update-modal-title">发现新版本</h2>
+    <p class="modal-body">新版本 <code class="mono" id="update-modal-latest">—</code> 已发布(当前 <code class="mono" id="update-modal-current">—</code>)。是否立即更新?</p>
+    <label class="modal-check"><input type="checkbox" id="update-modal-skip">不再提醒这个版本</label>
+    <div class="modal-actions">
+      <button type="button" class="btn ghost" id="update-modal-later">暂不更新</button>
+      <button type="button" class="btn primary" id="update-modal-go"><svg class="icon" aria-hidden="true"><use href="#i-download"/></svg>立即更新</button>
+    </div>
+  </div>
+</div>
 <div class="toast" id="toast" role="status" aria-live="polite"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg><span id="toast-text"></span><button type="button" class="toast-action" id="toast-action" hidden>撤销</button></div>
 <script src="app.js"></script>
 </body>

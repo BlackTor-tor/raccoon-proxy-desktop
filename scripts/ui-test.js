@@ -3,8 +3,20 @@ const { app, BrowserWindow } = require('electron');
 const http = require('http');
 const path = require('path');
 
-// ---- mock 网关:SSE 先发思维链再发答案,记录 reasoning_effort ----
+// ---- mock 网关:SSE 先发思维链再发答案,记录 reasoning_effort;附带积分/签到路由 ----
 let lastBody = null;
+let checkinDone = false;
+let mockBalance = { available_points: 6798, daily_points: 798, monthly_points: 0, reward_points: 6000, topup_points: 0 };
+const json = (res, obj) => {
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+  res.end(JSON.stringify(obj));
+};
+const pointsPayload = (extra) => ({
+  ok: true,
+  points: mockBalance,
+  checkin: { date: checkinDone ? '2026-10-28' : null, today: '2026-10-28', lastResult: checkinDone ? 'granted(manual)' : '' },
+  ...extra,
+});
 const upstream = http.createServer((req, res) => {
   if (req.url === '/health') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -13,6 +25,16 @@ const upstream = http.createServer((req, res) => {
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*' });
     return res.end();
+  }
+  if (req.url === '/api/points') return json(res, pointsPayload());
+  if (req.url === '/api/checkin') {
+    const granted = !checkinDone;
+    if (granted) {
+      checkinDone = true;
+      mockBalance = { ...mockBalance, available_points: mockBalance.available_points + 20, reward_points: mockBalance.reward_points + 20 };
+    }
+    req.resume();
+    return json(res, pointsPayload({ granted, popup: granted ? { points: 20, source: 'daily' } : null }));
   }
   let body = '';
   req.on('data', (c) => body += c);
@@ -106,6 +128,50 @@ app.whenReady().then(async () => {
   })()`);
   assert('设置页有版本号与检查更新按钮', updateBlock.present === true && /^(v)?\d+\.\d+\.\d+$|^—$/.test(updateBlock.versionText), updateBlock);
   assert('无桥接时检查更新优雅降级并显示 Releases 链接', updateBlock.stateText.includes('无法') && updateBlock.btnReEnabled === true && updateBlock.fallbackShown === true, updateBlock);
+
+  // 0.7) 官方积分:余额/明细渲染 + 手动签到
+  const pointsBefore = await run(`(async () => {
+    document.querySelector('[data-page="dashboard"]').click();
+    await new Promise(r => setTimeout(r, 200));
+    for (let i = 0; i < 40; i++) { if (document.getElementById('points-available').textContent !== '—') break; await new Promise(r => setTimeout(r, 100)); }
+    return {
+      available: document.getElementById('points-available').textContent,
+      breakdown: document.getElementById('points-breakdown').textContent,
+      btnDisabled: document.getElementById('checkin-btn').disabled,
+      label: document.getElementById('checkin-label').textContent,
+    };
+  })()`);
+  assert('积分面板显示可用积分与明细', pointsBefore.available === '6,798' && pointsBefore.breakdown.includes('今日 798') && pointsBefore.breakdown.includes('奖励 6,000'), pointsBefore);
+  assert('未签到时签到按钮可用', pointsBefore.btnDisabled === false && pointsBefore.label === '立即签到', pointsBefore);
+
+  const afterCheckin = await run(`(async () => {
+    document.getElementById('checkin-btn').click();
+    await new Promise(r => setTimeout(r, 500));
+    return {
+      available: document.getElementById('points-available').textContent,
+      label: document.getElementById('checkin-label').textContent,
+      disabled: document.getElementById('checkin-btn').disabled,
+      toastVisible: document.getElementById('toast').classList.contains('visible'),
+      toastText: document.getElementById('toast-text').textContent,
+    };
+  })()`);
+  assert('手动签到后余额刷新且按钮置为已签到', afterCheckin.available === '6,818' && afterCheckin.disabled === true && afterCheckin.label === '今日已签到', afterCheckin);
+  assert('签到成功有 toast 提示', afterCheckin.toastVisible === true && afterCheckin.toastText.includes('签到成功'), afterCheckin);
+
+  // 0.8) 更新提醒弹窗:显示版本号,勾选「不再提醒」后关闭
+  const modal = await run(`(async () => {
+    showUpdateModal({ latest: '9.9.9', current: '1.6.0', downloadUrl: '' });
+    await new Promise(r => setTimeout(r, 100));
+    const visible = !document.getElementById('update-modal').hidden;
+    const latest = document.getElementById('update-modal-latest').textContent;
+    const current = document.getElementById('update-modal-current').textContent;
+    document.getElementById('update-modal-skip').checked = true;
+    document.getElementById('update-modal-later').click();
+    await new Promise(r => setTimeout(r, 100));
+    return { visible, latest, current, closed: document.getElementById('update-modal').hidden === true };
+  })()`);
+  assert('新版本弹窗出现且版本号正确', modal.visible === true && modal.latest === 'v9.9.9' && modal.current === 'v1.6.0', modal);
+  assert('勾选不再提醒后点暂不更新可关闭弹窗', modal.closed === true, modal);
 
   // 1) 切到对话调试页(真实用户路径),选思考程度=低,发送消息(mock 网关秒回)
   await run(`(async () => { document.querySelector('[data-page="playground"]').click(); await new Promise(r => setTimeout(r, 300)); document.getElementById('chat-effort').value = 'low'; })()`);
