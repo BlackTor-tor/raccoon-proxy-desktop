@@ -11,6 +11,7 @@
  */
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const http = require('http');
 const https = require('https');
@@ -24,10 +25,14 @@ const CATALOG_TTL_MS = 10 * 60 * 1000;
 const UPSTREAM_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 const POINTS_URL_PATH = '/api/web/points/v1/balance';
 const BILLS_URL_PATH = '/api/web/points/v2/bills';
-const GRANT_URL_PATH = '/api/web/desktop/v1/login/points/grant';
+const DEVICE_BIND_PATH = '/api/web/auth/v1/devices_current_bind';
+const DEVICE_HEARTBEAT_PATH = '/api/web/auth/v1/devices_current_heartbeat';
 const CHECKIN_FILE = process.env.XHX_CHECKIN_FILE || path.join(__dirname, '.checkin');
-const CHECKIN_INTERVAL_MS = 30 * 60 * 1000; // 签到失败后每 30 分钟重试,成功后当天不再请求
+const DEVICE_FILE = process.env.XHX_DEVICE_FILE || path.join(__dirname, '.device.json');
+const CHECKIN_INTERVAL_MS = 30 * 60 * 1000; // 未到账时每 30 分钟重试,成功后当天不再请求
+const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // 设备心跳保持在线
 const CLIENT_PLATFORM = process.env.XHX_CLIENT_PLATFORM || 'desktop-windows';
+const CLIENT_VERSION = process.env.XHX_CLIENT_VERSION || '1.1.5';
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
 
@@ -130,7 +135,7 @@ async function loginOnce() {
     phone: encryptCredential(PHONE),
     password: encryptCredential(PASSWORD),
   });
-  const res = await request('POST', LOGIN_URL_PATH, { body });
+  const res = await request('POST', LOGIN_URL_PATH, { body, headers: clientHeaders() });
   const text = await readJsonBody(res);
   let token = null;
   try {
@@ -141,7 +146,7 @@ async function loginOnce() {
   } catch {}
   if (!token) throw new Error(`登录失败: HTTP ${res.statusCode} ${text.slice(0, 300)}`);
   // 上游 token 首次使用前需要 confirm 一次
-  const confirm = await request('POST', CONFIRM_URL_PATH, { body: '{}', token });
+  const confirm = await request('POST', CONFIRM_URL_PATH, { body: '{}', token, headers: clientHeaders() });
   await readJsonBody(confirm).catch(() => {});
   try {
     fs.writeFileSync(TOKEN_FILE, token, 'utf8');
@@ -167,9 +172,9 @@ async function getToken(forceRefresh = false) {
   return tokenPromise;
 }
 
-// ---- 官方每日签到(桌面端登录奖励)与积分余额 ----
-// 签到即官方客户端每次启动调用的 login/points/grant,服务端按自然日去重;
-// granted=false 表示今日已由官方客户端领取,同样视为完成。
+// ---- 每日积分自动领取与可信设备 ----
+// 上游按「可信设备会话」发放每日积分(+300):每日以设备身份完整登录一次,
+// 绑定可信设备并发心跳,随后以官方账单是否出现当日「每日积分发放」为准确认到账。
 function localDateStr(d = new Date()) {
   const p = (n) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
@@ -179,12 +184,92 @@ let checkinState = { date: null, lastResult: '' };
 try {
   const j = JSON.parse(fs.readFileSync(CHECKIN_FILE, 'utf8'));
   if (j && typeof j.date === 'string') checkinState.date = j.date;
+  if (j && typeof j.lastResult === 'string') checkinState.lastResult = j.lastResult;
 } catch {}
 
 function saveCheckinState() {
   try {
-    fs.writeFileSync(CHECKIN_FILE, JSON.stringify({ date: checkinState.date, at: new Date().toISOString() }), 'utf8');
+    fs.writeFileSync(CHECKIN_FILE, JSON.stringify({ date: checkinState.date, lastResult: checkinState.lastResult, at: new Date().toISOString() }), 'utf8');
   } catch {}
+}
+
+// 本机代理的设备身份(与官方客户端各自独立),首次运行生成并落盘
+let deviceIdentity = null;
+function loadDeviceIdentity() {
+  if (deviceIdentity) return deviceIdentity;
+  try {
+    const j = JSON.parse(fs.readFileSync(DEVICE_FILE, 'utf8'));
+    if (j && typeof j.clientDeviceId === 'string' && j.clientDeviceId) {
+      deviceIdentity = { clientDeviceId: j.clientDeviceId, createdAt: j.createdAt || new Date().toISOString() };
+      return deviceIdentity;
+    }
+  } catch {}
+  deviceIdentity = { clientDeviceId: crypto.randomUUID(), createdAt: new Date().toISOString() };
+  try {
+    fs.writeFileSync(DEVICE_FILE, JSON.stringify(deviceIdentity, null, 2), 'utf8');
+  } catch {}
+  return deviceIdentity;
+}
+
+function clientHeaders() {
+  return {
+    'X-Client-Platform': CLIENT_PLATFORM,
+    'X-Client-Device-ID': loadDeviceIdentity().clientDeviceId,
+    'X-Client-Version': CLIENT_VERSION,
+    'X-Request-Id': crypto.randomUUID(),
+  };
+}
+
+function deviceOsName() {
+  return process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
+}
+
+// 绑定可信设备(上游对可信设备会话发放每日积分)
+async function bindTrustedDevice(token) {
+  const id = loadDeviceIdentity();
+  const body = JSON.stringify({
+    client_device_id_source: 'unknown',
+    client_device_id: id.clientDeviceId,
+    client_platform: CLIENT_PLATFORM,
+    client_version: CLIENT_VERSION,
+    device_name: (os.hostname() || 'Desktop').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Desktop',
+    os: deviceOsName(),
+    os_version: os.release(),
+    application: 'desktop',
+    push_permission: 'unknown',
+  });
+  const res = await request('POST', DEVICE_BIND_PATH, { body, token, headers: clientHeaders(), timeoutMs: 20000 });
+  const text = await readJsonBody(res);
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  if (res.statusCode !== 200 || (json && json.code !== 0)) throw new Error(`trusted device bind HTTP ${res.statusCode}: ${text.slice(0, 160)}`);
+  return (json && json.data) || {};
+}
+
+async function sendHeartbeat() {
+  return authedJson('POST', DEVICE_HEARTBEAT_PATH, { headers: clientHeaders(), timeoutMs: 20000 });
+}
+
+// 以账单为准判断今天是否已发放每日积分
+async function hasDailyGrantToday() {
+  const today = localDateStr();
+  const { items } = await fetchBills(30);
+  return items.some((b) => String(b.at).startsWith(today) && /每日积分发放/.test(b.event));
+}
+
+// 每日领取:以设备身份重新登录 → 绑定可信设备 → 心跳 → 轮询账单确认到账
+async function doCheckin(reason) {
+  await getToken(true); // 强制重新登录(带设备头)
+  await bindTrustedDevice(await getToken()).catch((e) => log(`可信设备绑定失败: ${String(e?.message || e)}`));
+  await sendHeartbeat().catch((e) => log(`设备心跳失败: ${String(e?.message || e)}`));
+  let confirmed = false;
+  for (let i = 0; i < 4 && !confirmed; i++) {
+    if (i) await new Promise((r) => setTimeout(r, 1500));
+    confirmed = await hasDailyGrantToday().catch(() => false);
+  }
+  return { confirmed };
 }
 
 // 带 token 且 401/403 自动重登一次的 JSON 请求
@@ -208,16 +293,6 @@ async function fetchPoints(force = false) {
   if (json?.code !== 0 || !json.data) throw new Error(`points balance: unexpected response ${JSON.stringify(json).slice(0, 120)}`);
   pointsCache = { at: Date.now(), data: json.data };
   return pointsCache.data;
-}
-
-async function doCheckin() {
-  const json = await authedJson('POST', GRANT_URL_PATH, { headers: { 'X-Client-Platform': CLIENT_PLATFORM } });
-  if (json?.code !== 0) throw new Error(`points grant: code=${json?.code} ${json?.message || ''}`);
-  const granted = json?.data?.granted === true;
-  if (granted) pointsCache = { at: 0, data: null }; // 余额变化,失效缓存
-  checkinState.date = localDateStr();
-  saveCheckinState();
-  return { granted, popup: json?.data?.popup || null };
 }
 
 // 官方积分账单(消耗/发放流水):GET /api/web/points/v2/bills,游标分页
@@ -377,18 +452,23 @@ async function autoCheckin(reason) {
   const today = localDateStr();
   if (checkinState.date === today) return;
   try {
-    const { granted, popup } = await doCheckin();
-    checkinState.lastResult = granted ? `granted(${reason})` : 'already-granted';
-    if (granted) {
+    const { confirmed } = await doCheckin(reason);
+    if (confirmed) {
+      checkinState.date = today;
+      checkinState.lastResult = `daily-granted(${reason})`;
+      saveCheckinState();
+      pointsCache = { at: 0, data: null };
       const b = await fetchPoints(true).catch(() => null);
-      log(`每日积分已签到入账${b ? `:可用 ${b.available_points}` : ''}`);
-      if (popup) log(`签到弹窗: ${JSON.stringify(popup).slice(0, 200)}`);
+      log(`每日积分已自动领取${b ? `:今日 ${b.daily_points}` : ''}`);
     } else {
-      log('今日积分已领取过(官方侧已去重),跳过签到');
+      checkinState.lastResult = 'pending';
+      saveCheckinState();
+      log(`每日积分尚未到账,${CHECKIN_INTERVAL_MS / 60000} 分钟后重试`);
     }
   } catch (e) {
     checkinState.lastResult = `failed: ${String(e?.message || e).slice(0, 160)}`;
-    log(`每日积分签到失败(${CHECKIN_INTERVAL_MS / 60000} 分钟后重试): ${e.message}`);
+    saveCheckinState();
+    log(`每日积分自动领取失败(${CHECKIN_INTERVAL_MS / 60000} 分钟后重试): ${e.message}`);
   }
 }
 
@@ -655,10 +735,21 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === 'POST /api/checkin') {
-      const { granted, popup } = await doCheckin();
+      const today = localDateStr();
+      const already = checkinState.date === today;
+      let confirmed = already;
+      if (!already) {
+        const r = await doCheckin('manual').catch((e) => ({ confirmed: false, error: String(e?.message || e) }));
+        confirmed = !!r.confirmed;
+        checkinState.lastResult = confirmed ? 'daily-granted(manual)' : r.error ? `failed: ${r.error.slice(0, 160)}` : 'pending';
+        if (confirmed) {
+          checkinState.date = today;
+          pointsCache = { at: 0, data: null };
+        }
+        saveCheckinState();
+      }
       const points = await fetchPoints(true).catch(() => null);
-      checkinState.lastResult = granted ? 'granted(manual)' : 'already-granted';
-      return sendJson(res, 200, { ok: true, granted, popup, points, checkin: { date: checkinState.date, today: localDateStr(), lastResult: checkinState.lastResult } });
+      return sendJson(res, 200, { ok: true, granted: confirmed, already, pending: !confirmed && !already, points, checkin: { date: checkinState.date, today, lastResult: checkinState.lastResult } });
     }
 
     return sendJson(res, 404, { error: { message: `unknown route ${route}`, type: 'invalid_request_error' } });
@@ -685,9 +776,11 @@ server.listen(PORT, HOST, async () => {
     const token = await getToken();
     const exp = jwtExp(token);
     log(`token ready (expires ${isFiniteNum(exp) ? new Date(exp).toISOString() : '?'})`);
-    // 启动即尝试当日签到(与官方客户端登录领奖一致);之后每 30 分钟补一次,当日成功则跳过
+    // 启动即尝试当日自动领取(设备登录+绑定+心跳);之后每 30 分钟补一次,当日到账后跳过
     autoCheckin('startup').catch(() => {});
     setInterval(() => autoCheckin('timer').catch(() => {}), CHECKIN_INTERVAL_MS);
+    // 在线期间周期性心跳,维持可信设备在线
+    setInterval(() => sendHeartbeat().catch(() => {}), HEARTBEAT_INTERVAL_MS);
   } catch (e) {
     console.error(`[raccoon-proxy] initial login failed: ${e.message}`);
   }

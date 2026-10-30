@@ -105,6 +105,7 @@ function startProxy() {
     XHX_TOKEN_FILE: path.join(app.getPath('userData'), 'token.cache'),
     XHX_CHECKIN_FILE: path.join(app.getPath('userData'), 'checkin.json'),
     XHX_USAGE_FILE: path.join(app.getPath('userData'), 'usage.json'),
+    XHX_DEVICE_FILE: path.join(app.getPath('userData'), 'device.json'),
   };
   try {
     child = fork(path.join(__dirname, 'proxy', 'server.js'), [], { env, silent: true });

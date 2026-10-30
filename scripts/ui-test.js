@@ -166,7 +166,7 @@ app.whenReady().then(async () => {
   assert('官方账单行无 token 时显示占位', pointsBefore.rows[1][2] === '—' && pointsBefore.rows[1][3] === '—' && pointsBefore.rows[1][5] === '+798', pointsBefore.rows[1]);
   assert('限免模型变动显示「免费」', pointsBefore.rows[2][2] === '1,200' && pointsBefore.rows[2][5] === '免费', pointsBefore.rows[2]);
   assert('未入账请求变动显示占位', pointsBefore.rows[3][2] === '30' && pointsBefore.rows[3][5] === '—', pointsBefore.rows[3]);
-  assert('未签到时签到按钮可用', pointsBefore.btnDisabled === false && pointsBefore.label === '立即签到', pointsBefore);
+  assert('未签到时签到按钮可用', pointsBefore.btnDisabled === false && pointsBefore.label === '立即领取', pointsBefore);
 
   const afterCheckin = await run(`(async () => {
     document.getElementById('checkin-btn').click();
@@ -179,8 +179,8 @@ app.whenReady().then(async () => {
       toastText: document.getElementById('toast-text').textContent,
     };
   })()`);
-  assert('手动签到后余额刷新且按钮置为已签到', afterCheckin.available === '6,818' && afterCheckin.disabled === true && afterCheckin.label === '今日已签到', afterCheckin);
-  assert('签到成功有 toast 提示', afterCheckin.toastVisible === true && afterCheckin.toastText.includes('签到成功'), afterCheckin);
+  assert('手动签到后余额刷新且按钮置为已签到', afterCheckin.available === '6,818' && afterCheckin.disabled === true && afterCheckin.label === '今日已领取', afterCheckin);
+  assert('签到成功有 toast 提示', afterCheckin.toastVisible === true && afterCheckin.toastText.includes('领取成功'), afterCheckin);
 
   // 0.8) 更新提醒弹窗:显示版本号,勾选「不再提醒」后关闭
   const modal = await run(`(async () => {

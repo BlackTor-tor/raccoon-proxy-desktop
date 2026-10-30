@@ -290,7 +290,7 @@ const fmtNum = (n) => (Number.isFinite(n) ? Number(n).toLocaleString('zh-CN') : 
 
 function setCheckinIdle() {
   $('checkin-btn').disabled = false;
-  $('checkin-label').textContent = '立即签到';
+  $('checkin-label').textContent = '立即领取';
 }
 function renderPoints(data) {
   const p = data && data.points;
@@ -306,11 +306,12 @@ function renderPoints(data) {
   const ck = data.checkin || {};
   if (ck.date && ck.date === ck.today) {
     $('checkin-btn').disabled = true;
-    $('checkin-label').textContent = '今日已签到';
-    $('checkin-state').textContent = ck.lastResult === 'already-granted' ? '官方客户端已领取,账户积分一致' : '服务启动时已自动签到';
+    $('checkin-label').textContent = '今日已领取';
+    $('checkin-state').textContent = '服务在线时每天自动领取';
   } else {
     setCheckinIdle();
-    $('checkin-state').textContent = ck.lastResult && String(ck.lastResult).startsWith('failed') ? '自动签到未完成,可手动重试' : '今日尚未签到';
+    const failed = ck.lastResult && String(ck.lastResult).startsWith('failed');
+    $('checkin-state').textContent = failed ? '自动领取失败,可手动重试' : ck.lastResult === 'pending' ? '自动领取中,到账后自动显示' : '今日尚未领取';
   }
 }
 function renderPointsUnavailable() {
@@ -335,21 +336,23 @@ async function refreshPoints(force = false) {
   } catch { renderPointsUnavailable(); }
 }
 async function checkinNow() {
-  if (checkinBusy || !state.running) { if (!state.running) toast('请先开启服务再签到'); return; }
+  if (checkinBusy || !state.running) { if (!state.running) toast('请先开启服务再领取'); return; }
   checkinBusy = true;
   $('checkin-btn').disabled = true;
-  $('checkin-label').textContent = '签到中…';
+  $('checkin-label').textContent = '领取中…';
   try {
     const r = await fetch(`http://127.0.0.1:${state.settings.port}/api/checkin`, { method: 'POST', headers: pointsHeaders({ 'Content-Type': 'application/json' }), body: '{}' });
     const data = r.ok ? await r.json() : null;
     if (!data || data.ok !== true) throw new Error();
     renderPoints(data);
-    toast(data.granted ? '签到成功,积分已到账' : '今日已签到过,积分都在账户中');
-    addLog(data.granted ? '签到成功' + (data.points ? ',可用 ' + fmtNum(data.points.available_points) : '') : '签到:今日已领取过');
+    if (data.already) toast('今日已领取过,积分都在账户中');
+    else if (data.granted) toast('领取成功,积分已到账');
+    else toast('领取请求已提交,到账后自动显示');
+    addLog(data.granted ? '每日积分领取成功' + (data.points ? ',今日 ' + fmtNum(data.points.daily_points) : '') : data.already ? '每日积分:今日已领取' : '每日积分:已提交领取,等待到账');
     if (state.page === 'points') fetchBillsData();
   } catch {
-    toast('签到失败,请检查服务状态');
-    addLog('签到失败', 'error');
+    toast('领取失败,请检查服务状态');
+    addLog('每日积分领取失败', 'error');
     setCheckinIdle();
   } finally { checkinBusy = false; }
 }
