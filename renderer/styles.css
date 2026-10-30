@@ -239,7 +239,6 @@ table.bills .delta.pos { color: var(--green-ink); }
 table.bills .delta.neg { color: var(--ink); }
 table.bills .delta.free { color: var(--green-ink); }
 .bills-empty { font-size: 12px; color: var(--ink-3); padding: 20px 0; }
-.bills-foot { padding-top: 10px; }
 
 /* ---- 更新提醒弹窗 ---- */
 .modal-mask { position: fixed; inset: 0; background: rgba(28,28,26,.32); display: grid; place-items: center; z-index: 60; }

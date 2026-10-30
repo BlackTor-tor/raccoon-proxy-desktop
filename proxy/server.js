@@ -337,17 +337,14 @@ function reconcileUsage(billItems, minAgeMs = 5000) {
   if (changed) saveUsageLog();
 }
 
-// 合并视图:本地 usage 行(带 token)优先,其余账单行照常展示
-function buildBillsView(billItems) {
+// 合并视图:本地 usage 行(带 token)优先,其余账单行照常展示;整体只保留最近 limit 条
+function buildBillsView(billItems, limit = 100) {
   reconcileUsage(billItems);
   const byBill = new Map();
   for (const rec of usageLog) if (rec.billId) byBill.set(rec.billId, rec);
   const rows = [];
   const seen = new Set();
-  let oldest = null;
   for (const b of billItems) {
-    const t = Date.parse(b.at) || 0;
-    if (oldest === null || t < oldest) oldest = t;
     const u = byBill.get(b.id);
     if (u) {
       rows.push(usageRow(u));
@@ -358,11 +355,10 @@ function buildBillsView(billItems) {
   }
   for (const rec of usageLog) {
     if (rec.billId || seen.has(rec.id)) continue;
-    if (oldest !== null && (Date.parse(rec.at) || 0) < oldest) continue; // 更早的等「加载更多」后再出现
     rows.push(usageRow(rec));
   }
   rows.sort((a, b) => (Date.parse(b.at) || 0) - (Date.parse(a.at) || 0));
-  return rows;
+  return rows.slice(0, limit);
 }
 
 function usageRow(rec) {
@@ -652,11 +648,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (route === 'GET /api/points/bills') {
-      const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 50));
-      const cursor = url.searchParams.get('cursor') || null;
-      const bills = await fetchBills(limit, cursor);
+      const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 100));
+      const bills = await fetchBills(limit);
       const points = await fetchPoints().catch(() => null);
-      return sendJson(res, 200, { ok: true, items: buildBillsView(bills.items), nextCursor: bills.nextCursor, hasMore: bills.hasMore, points, checkin: { date: checkinState.date, today: localDateStr(), lastResult: checkinState.lastResult } });
+      return sendJson(res, 200, { ok: true, items: buildBillsView(bills.items, limit), points, checkin: { date: checkinState.date, today: localDateStr(), lastResult: checkinState.lastResult } });
     }
 
     if (route === 'POST /api/checkin') {

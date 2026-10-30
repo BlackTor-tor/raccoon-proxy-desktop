@@ -157,9 +157,11 @@ app.whenReady().then(async () => {
       rows,
       btnDisabled: document.getElementById('checkin-btn').disabled,
       label: document.getElementById('checkin-label').textContent,
+      loadMoreAbsent: document.getElementById('bills-more') === null,
     };
   })()`);
   assert('积分管理页可进入并显示总积分', pointsBefore.pageVisible === true && pointsBefore.available === '6,798' && pointsBefore.breakdown.includes('今日 798') && pointsBefore.breakdown.includes('奖励 6,000'), pointsBefore);
+  assert('明细只保留最近 100 条(无加载更多)', pointsBefore.loadMoreAbsent === true && pointsBefore.rows.length === 4, { absent: pointsBefore.loadMoreAbsent, rows: pointsBefore.rows.length });
   assert('明细含 token 读取/写入/缓存与变动列', pointsBefore.rows.length === 4 && pointsBefore.rows[0].length === 6 && pointsBefore.rows[0][2] === '12' && pointsBefore.rows[0][3] === '4' && pointsBefore.rows[0][4] === '0' && pointsBefore.rows[0][5] === '-2', pointsBefore.rows);
   assert('官方账单行无 token 时显示占位', pointsBefore.rows[1][2] === '—' && pointsBefore.rows[1][3] === '—' && pointsBefore.rows[1][5] === '+798', pointsBefore.rows[1]);
   assert('限免模型变动显示「免费」', pointsBefore.rows[2][2] === '1,200' && pointsBefore.rows[2][5] === '免费', pointsBefore.rows[2]);

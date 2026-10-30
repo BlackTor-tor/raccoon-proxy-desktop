@@ -98,7 +98,7 @@
       </header>
       <div class="content points-content">
         <section class="block" aria-labelledby="points-balance-title">
-          <h2 id="points-balance-title">官方积分 <span class="sub">每日签到自动领取,与官方客户端一致</span></h2>
+          <h2 id="points-balance-title">官方积分 <span class="sub">每日积分由官方客户端登录时发放</span></h2>
           <div class="points-row">
             <div class="points-main">
               <div class="points-value"><span class="num" id="points-available">—</span><span class="points-unit">可用积分</span></div>
@@ -111,13 +111,12 @@
           </div>
         </section>
         <section class="block" aria-labelledby="bills-title">
-          <h2 id="bills-title">消耗明细 <span class="sub">来自官方账单</span></h2>
+          <h2 id="bills-title">消耗明细 <span class="sub">来自官方账单 · 最近 100 条</span></h2>
           <table class="bills">
             <thead><tr><th>时间</th><th>事项</th><th class="num">读取</th><th class="num">写入</th><th class="num">缓存</th><th class="num">变动</th></tr></thead>
             <tbody id="bills-list"></tbody>
           </table>
           <p class="bills-empty" id="bills-empty" hidden>暂无记录</p>
-          <div class="bills-foot"><button type="button" class="text-button" id="bills-more" hidden>加载更多</button></div>
         </section>
       </div>
     </section>
