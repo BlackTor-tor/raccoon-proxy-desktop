@@ -27,12 +27,16 @@ const POINTS_URL_PATH = '/api/web/points/v1/balance';
 const BILLS_URL_PATH = '/api/web/points/v2/bills';
 const DEVICE_BIND_PATH = '/api/web/auth/v1/devices_current_bind';
 const DEVICE_HEARTBEAT_PATH = '/api/web/auth/v1/devices_current_heartbeat';
+const SETTING_INFO_PATH = '/api/web/office/v3/setting_info'; // 官方网页聚焦时调用,服务端在此补发每日积分
 const CHECKIN_FILE = process.env.XHX_CHECKIN_FILE || path.join(__dirname, '.checkin');
 const DEVICE_FILE = process.env.XHX_DEVICE_FILE || path.join(__dirname, '.device.json');
 const CHECKIN_INTERVAL_MS = 30 * 60 * 1000; // 未到账时每 30 分钟重试,成功后当天不再请求
 const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000; // 设备心跳保持在线
 const CLIENT_PLATFORM = process.env.XHX_CLIENT_PLATFORM || 'desktop-windows';
 const CLIENT_VERSION = process.env.XHX_CLIENT_VERSION || '1.1.5';
+// 网页端(每日积分按 web 会话发放)使用的标识
+const WEB_PLATFORM = 'web';
+const WEB_VERSION = '156.0.0.0';
 const USER_AGENT =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/156.0.0.0 Safari/537.36';
 
@@ -224,30 +228,6 @@ function deviceOsName() {
   return process.platform === 'darwin' ? 'macos' : process.platform === 'win32' ? 'windows' : 'linux';
 }
 
-// 绑定可信设备(上游对可信设备会话发放每日积分)
-async function bindTrustedDevice(token) {
-  const id = loadDeviceIdentity();
-  const body = JSON.stringify({
-    client_device_id_source: 'unknown',
-    client_device_id: id.clientDeviceId,
-    client_platform: CLIENT_PLATFORM,
-    client_version: CLIENT_VERSION,
-    device_name: (os.hostname() || 'Desktop').replace(/[\u0000-\u001f\u007f]/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120) || 'Desktop',
-    os: deviceOsName(),
-    os_version: os.release(),
-    application: 'desktop',
-    push_permission: 'unknown',
-  });
-  const res = await request('POST', DEVICE_BIND_PATH, { body, token, headers: clientHeaders(), timeoutMs: 20000 });
-  const text = await readJsonBody(res);
-  let json = null;
-  try {
-    json = JSON.parse(text);
-  } catch {}
-  if (res.statusCode !== 200 || (json && json.code !== 0)) throw new Error(`trusted device bind HTTP ${res.statusCode}: ${text.slice(0, 160)}`);
-  return (json && json.data) || {};
-}
-
 async function sendHeartbeat() {
   return authedJson('POST', DEVICE_HEARTBEAT_PATH, { headers: clientHeaders(), timeoutMs: 20000 });
 }
@@ -259,11 +239,79 @@ async function hasDailyGrantToday() {
   return items.some((b) => String(b.at).startsWith(today) && /每日积分发放/.test(b.event));
 }
 
-// 每日领取:以设备身份重新登录 → 绑定可信设备 → 心跳 → 轮询账单确认到账
+// 网页会话登录:与官网登录页一致(不带 X-Client-* 头),成功后写回 token 文件
+async function loginWebSession() {
+  const body = JSON.stringify({ nation_code: NATION_CODE, phone: encryptCredential(PHONE), password: encryptCredential(PASSWORD) });
+  const res = await request('POST', LOGIN_URL_PATH, { body });
+  const text = await readJsonBody(res);
+  let token = null;
+  try {
+    const j = JSON.parse(text);
+    if (j?.data?.access_token) token = j.data.access_token;
+  } catch {}
+  if (!token) throw new Error(`web login HTTP ${res.statusCode}: ${text.slice(0, 160)}`);
+  await request('POST', CONFIRM_URL_PATH, { body: '{}', token }).then((r) => readJsonBody(r)).catch(() => {});
+  try {
+    fs.writeFileSync(TOKEN_FILE, token, 'utf8');
+  } catch {}
+  return token;
+}
+
+function webHeaders(deviceId) {
+  return { 'X-Client-Platform': WEB_PLATFORM, 'X-Client-Version': WEB_VERSION, 'X-Client-Device-ID': deviceId, 'X-Request-Id': crypto.randomUUID() };
+}
+
+// 把当前会话绑定为「网页可信设备」
+async function bindWebDevice(token) {
+  const id = loadDeviceIdentity().clientDeviceId;
+  const body = JSON.stringify({
+    application: 'web',
+    client_device_id: id,
+    client_device_id_source: id,
+    client_platform: WEB_PLATFORM,
+    client_version: WEB_VERSION,
+    device_name: 'Chrome',
+    os: deviceOsName(),
+    os_version: '10',
+    push_permission: 'granted',
+  });
+  const res = await request('POST', DEVICE_BIND_PATH, { body, token, headers: webHeaders(id), timeoutMs: 20000 });
+  const text = await readJsonBody(res);
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  if (res.statusCode !== 200 || (json && json.code !== 0)) throw new Error(`web trusted device bind HTTP ${res.statusCode}: ${text.slice(0, 160)}`);
+  return (json && json.data) || {};
+}
+
+async function sendWebHeartbeat(token, serverDeviceId) {
+  const res = await request('POST', DEVICE_HEARTBEAT_PATH, { token, headers: webHeaders(serverDeviceId), timeoutMs: 20000 });
+  await readJsonBody(res).catch(() => {});
+  if (res.statusCode !== 200) throw new Error(`web heartbeat HTTP ${res.statusCode}`);
+}
+
+async function fetchServerDeviceId(token) {
+  const res = await request('GET', '/api/web/auth/v1/user_info', { token, headers: webHeaders(loadDeviceIdentity().clientDeviceId), timeoutMs: 20000 });
+  const json = JSON.parse(await readJsonBody(res));
+  return (json && json.data && json.data.trusted_device && json.data.trusted_device.device_id) || '';
+}
+
+// 触发每日积分补发:官方网页在窗口聚焦时调用的账户设置接口(setting_info)
+async function triggerDailyGrant(token) {
+  const res = await request('GET', SETTING_INFO_PATH, { token, headers: { 'X-Client-Platform': WEB_PLATFORM, 'X-Client-Version': WEB_VERSION }, timeoutMs: 20000 });
+  const text = await readJsonBody(res);
+  if (res.statusCode !== 200) throw new Error(`setting_info HTTP ${res.statusCode}: ${text.slice(0, 160)}`);
+  return true;
+}
+
+// 每日领取:网页会话登录 → 绑定 web 可信设备 → 心跳 → setting_info 触发放发 → 账单确认
 async function doCheckin(reason) {
-  await getToken(true); // 强制重新登录(带设备头)
-  await bindTrustedDevice(await getToken()).catch((e) => log(`可信设备绑定失败: ${String(e?.message || e)}`));
-  await sendHeartbeat().catch((e) => log(`设备心跳失败: ${String(e?.message || e)}`));
+  const token = await loginWebSession();
+  await bindWebDevice(token).catch((e) => log(`网页可信设备绑定失败: ${String(e?.message || e)}`));
+  const serverDeviceId = await fetchServerDeviceId(token).catch(() => '');
+  await sendWebHeartbeat(token, serverDeviceId || loadDeviceIdentity().clientDeviceId).catch((e) => log(`网页会话心跳失败: ${String(e?.message || e)}`));
+  await triggerDailyGrant(token).catch((e) => log(`每日积分触发失败: ${String(e?.message || e)}`));
   let confirmed = false;
   for (let i = 0; i < 4 && !confirmed; i++) {
     if (i) await new Promise((r) => setTimeout(r, 1500));
