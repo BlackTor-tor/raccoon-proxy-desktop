@@ -1,0 +1,65 @@
+name: Build Release
+
+# 推 v* 标签自动构建并发布 Release;也可在 Actions 页面手动触发只产出可下载的构建产物
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: |
+          PKG=$(node -p "require('./package.json').version")
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "package.json=$PKG tag=$TAG"
+          if [ "$PKG" != "$TAG" ]; then
+            echo "::error::package.json 版本 ($PKG) 与 tag ($TAG) 不一致"
+            exit 1
+          fi
+
+      - name: Build (nsis + portable)
+        run: npm run dist
+
+      - name: List artifacts
+        shell: bash
+        run: ls -la dist
+
+      - name: Upload build artifacts
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RaccoonProxy-${{ github.run_number }}
+          path: |
+            dist/RaccoonProxy-Setup-*.exe
+            dist/RaccoonProxy-*-portable.exe
+            dist/latest.yml
+
+      - name: Publish GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/RaccoonProxy-Setup-*.exe
+            dist/RaccoonProxy-*-portable.exe
+            dist/latest.yml

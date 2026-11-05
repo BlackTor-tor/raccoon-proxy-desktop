@@ -51,10 +51,10 @@
       ]
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
-      "shortcutName": "RaccoonProxy"
+      "artifactName": "RaccoonProxy-Setup-${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "RaccoonProxy-${version}-portable.${ext}"
     }
   },
   "repository": {
