@@ -14,8 +14,6 @@ const state = {
   theme: storage.get('theme', 'light'),
   variant: 'setup', // 客户端形态:setup(安装版)/ portable(便携版),由主进程状态同步
   settings: {
-    countryCode: typeof saved.countryCode === 'string' && /^\+\d{1,4}$/.test(saved.countryCode) ? saved.countryCode : '+86',
-    phone: '', password: '',
     port: Number.isInteger(saved.port) && saved.port >= 1024 && saved.port <= 65535 ? saved.port : 8317,
     apiKey: '', autoStart: saved.autoStart === true,
   },
@@ -64,6 +62,7 @@ function navigate(page) {
   $('breadcrumb-current').textContent = { dashboard: '仪表盘', points: '积分管理', settings: '设置', playground: '对话调试' }[page];
   storage.set('page', page);
   if (page === 'points') fetchBillsData();
+  if (page === 'settings') refreshPool();
 }
 function setTheme(theme) {
   state.theme = theme === 'dark' ? 'dark' : 'light'; document.documentElement.dataset.theme = state.theme;
@@ -168,17 +167,13 @@ function applyUpstream(h) {
 
 /* ---------- 设置 ---------- */
 
-function populateSettings() { const s = state.settings; $('country-code').value = s.countryCode; $('phone').value = s.phone; $('password').value = s.password; $('port').value = s.port; $('local-key').value = s.apiKey; state.autoStartDraft = s.autoStart; $('auto-start').setAttribute('aria-checked', String(s.autoStart)); }
+function populateSettings() { const s = state.settings; $('port').value = s.port; $('local-key').value = s.apiKey; state.autoStartDraft = s.autoStart; $('auto-start').setAttribute('aria-checked', String(s.autoStart)); }
 function validateSettings() {
-  ['phone', 'password', 'port', 'key'].forEach(id => $(id + '-error').textContent = '');
-  ['phone', 'country-code', 'password', 'port', 'local-key'].forEach(id => $(id).removeAttribute('aria-invalid'));
-  const value = { countryCode: $('country-code').value.trim(), phone: $('phone').value.trim(), password: $('password').value, port: Number($('port').value), apiKey: $('local-key').value.trim(), autoStart: state.autoStartDraft };
+  ['port', 'key'].forEach(id => $(id + '-error').textContent = '');
+  ['port', 'local-key'].forEach(id => $(id).removeAttribute('aria-invalid'));
+  const value = { port: Number($('port').value), apiKey: $('local-key').value.trim(), autoStart: state.autoStartDraft };
   let valid = true;
   const error = (field, text, input) => { $(field + '-error').textContent = text; $(input || field).setAttribute('aria-invalid', 'true'); valid = false; };
-  if (!/^\+\d{1,4}$/.test(value.countryCode)) error('phone', '请输入正确的国际区号，例如 +86', 'country-code');
-  if (value.phone && !/^\d{6,15}$/.test(value.phone)) error('phone', '手机号应为 6–15 位数字');
-  if (value.phone && !value.password) error('password', '填写手机号后，请同时填写密码');
-  if (value.password && !value.phone) error('phone', '请填写与密码对应的手机号');
   if (!Number.isInteger(value.port) || value.port < 1024 || value.port > 65535) error('port', '请输入 1024–65535 之间的整数端口');
   if (value.apiKey && !/^[\x21-\x7E]{1,256}$/.test(value.apiKey)) error('key', '密钥请使用不含空格的 ASCII 字符，最多 256 位', 'local-key');
   if (!valid) { document.querySelector('[aria-invalid="true"]').focus(); return null; } return value;
@@ -193,7 +188,7 @@ async function saveSettings(event) {
     if (nativeService) { const result = await bridge.saveSettings(value); if (result && result.ok === false) throw new Error(); }
     state.settings = value; state.keyVisible = false;
     if (wasRunning) { state.running = false; updateService(); if (nativeService) { await bridge.stopService(); const result = await bridge.startService(); if (result && result.ok === false) throw new Error(); } else await sleep(650); state.running = true; }
-    const stored = storage.set('preferences', { countryCode: value.countryCode, port: value.port, autoStart: value.autoStart });
+    const stored = storage.set('preferences', { port: value.port, autoStart: value.autoStart });
     if (!stored) toast('设置已应用，本机存储不可用'); else toast(wasRunning ? '设置已保存，服务已重启' + (nativeService ? '' : '（演示）') : '设置已保存');
     $('save-result').textContent = wasRunning ? '设置已应用，' + (nativeService ? '本机' : '演示') + '服务已重新启动。' : '设置已应用，服务保持停止。'; $('save-result').hidden = false;
     $('token-expiry').textContent = '待验证'; addLog((nativeService ? '' : '演示：') + '配置已更新' + (wasRunning ? '，服务已重启' : ''));
@@ -355,6 +350,84 @@ async function checkinNow() {
     addLog('每日积分领取失败', 'error');
     setCheckinIdle();
   } finally { checkinBusy = false; }
+}
+
+/* ---------- 账号池 ---------- */
+
+const poolState = { accounts: [], pool: null, loading: false, fetchedAt: 0 };
+const POOL_STATUS = { active: '可用', needs_auth: '待重新授权', cooldown: '限速冷却', exhausted: '今日额度用尽', disabled: '已停用' };
+function poolHeaders() { const h = {}; if (state.settings.apiKey) h.Authorization = 'Bearer ' + state.settings.apiKey; return h; }
+function fmtExpire(v) {
+  if (!v || Number.isNaN(new Date(v).getTime())) return '—';
+  const days = Math.max(0, Math.round((new Date(v) - Date.now()) / 86400000));
+  return days > 0 ? days + ' 天后' : '今天';
+}
+async function refreshPool(force = false) {
+  if (!nativeService || poolState.loading) return;
+  if (!force && Date.now() - poolState.fetchedAt < 15000) return;
+  poolState.loading = true;
+  try {
+    const r = await fetch(`http://127.0.0.1:${state.settings.port}/api/accounts`, { headers: poolHeaders() });
+    const data = r.ok ? await r.json() : null;
+    if (!data || data.ok !== true) throw new Error();
+    poolState.accounts = Array.isArray(data.accounts) ? data.accounts : [];
+    poolState.pool = data.pool || null;
+    poolState.fetchedAt = Date.now();
+    renderPool();
+  } catch {
+    const empty = $('pool-empty');
+    if (empty) { empty.hidden = false; empty.textContent = state.running ? '暂时无法获取账号,请稍后刷新' : '开启服务后可查看账号'; }
+  } finally { poolState.loading = false; }
+}
+function renderPool() {
+  const list = $('pool-list'); if (!list) return;
+  const accounts = poolState.accounts;
+  $('pool-summary').textContent = poolState.pool && poolState.pool.total ? `${poolState.pool.active}/${poolState.pool.total} 可用` : '—';
+  list.replaceChildren();
+  if (!accounts.length) {
+    const p = document.createElement('p'); p.className = 'hint'; p.id = 'pool-empty';
+    p.textContent = '暂无账号:点「扫码添加账号」用微信授权';
+    list.appendChild(p); return;
+  }
+  for (const a of accounts) {
+    const row = document.createElement('div'); row.className = 'pool-row';
+    const main = document.createElement('div'); main.className = 'pool-main';
+    const name = document.createElement('span'); name.className = 'pool-name';
+    name.textContent = a.name + (a.phone ? ' (' + a.phone + ')' : '');
+    const meta = document.createElement('span'); meta.className = 'pool-meta';
+    const bits = [POOL_STATUS[a.status] || a.status, '到期 ' + fmtExpire(a.tokenExpiresAt)];
+    if (a.availablePoints != null) bits.push(fmtNum(a.availablePoints) + ' 积分');
+    if (a.inFlight > 0) bits.push('在飞 ' + a.inFlight);
+    meta.textContent = bits.join(' · ');
+    if (a.lastError) meta.title = a.lastError;
+    main.append(name, meta);
+    const ops = document.createElement('div'); ops.className = 'pool-ops';
+    if (a.status === 'needs_auth') {
+      const reauth = document.createElement('button'); reauth.type = 'button'; reauth.textContent = '重新授权';
+      reauth.onclick = addAccountViaQr;
+      ops.append(reauth);
+    }
+    const toggle = document.createElement('button'); toggle.type = 'button'; toggle.textContent = a.enabled ? '停用' : '启用';
+    toggle.onclick = async () => {
+      try { await fetch(`http://127.0.0.1:${state.settings.port}/api/accounts/${encodeURIComponent(a.id)}/${a.enabled ? 'disable' : 'enable'}`, { method: 'POST', headers: poolHeaders() }); } catch {}
+      refreshPool(true);
+    };
+    const del = document.createElement('button'); del.type = 'button'; del.className = 'danger'; del.textContent = '移除';
+    del.onclick = async () => {
+      try { await fetch(`http://127.0.0.1:${state.settings.port}/api/accounts/${encodeURIComponent(a.id)}`, { method: 'DELETE', headers: poolHeaders() }); } catch {}
+      refreshPool(true);
+    };
+    ops.append(toggle, del);
+    row.append(main, ops);
+    list.appendChild(row);
+  }
+}
+async function addAccountViaQr() {
+  if (!hasBridge('openAuthPage')) return;
+  if (!state.running) { toast('请先开启服务,再扫码添加账号'); return; }
+  const r = await bridge.openAuthPage();
+  if (r && r.ok === false) toast(r.error || '打开授权页失败');
+  else toast('已在浏览器打开授权页,扫码后回到此处点「刷新」');
 }
 
 /* ---------- 积分账单明细 ---------- */
@@ -601,7 +674,7 @@ async function sendMessage(event) {
 document.querySelectorAll('[data-page]').forEach(el => el.addEventListener('click', () => navigate(el.dataset.page)));
 document.querySelectorAll('[data-go]').forEach(el => el.addEventListener('click', () => navigate(el.dataset.go)));
 document.querySelectorAll('[data-prompt]').forEach(el => el.addEventListener('click', () => { $('chat-input').value = el.dataset.prompt; $('chat-input').focus(); }));
-document.querySelectorAll('[data-reveal]').forEach(el => el.addEventListener('click', () => { const input = $(el.dataset.reveal); input.type = input.type === 'password' ? 'text' : 'password'; const label = (input.type === 'password' ? '显示' : '隐藏') + (input.id === 'password' ? '密码' : '本地 API Key'); el.setAttribute('aria-label', label); el.title = label; }));
+document.querySelectorAll('[data-reveal]').forEach(el => el.addEventListener('click', () => { const input = $(el.dataset.reveal); input.type = input.type === 'password' ? 'text' : 'password'; const label = (input.type === 'password' ? '显示' : '隐藏') + '本地 API Key'; el.setAttribute('aria-label', label); el.title = label; }));
 $('theme-toggle').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
 $('service-toggle').addEventListener('click', toggleService);
 $('copy-base-url').addEventListener('click', () => copy(baseUrl(), ' Base URL', $('copy-base-url')));
@@ -615,6 +688,8 @@ $('update-install').addEventListener('click', installUpdateUI);
 if (hasBridge('onUpdateProgress')) bridge.onUpdateProgress(handleUpdateProgress);
 $('checkin-btn').addEventListener('click', checkinNow);
 $('bills-refresh').addEventListener('click', () => fetchBillsData());
+$('pool-add').addEventListener('click', addAccountViaQr);
+$('pool-refresh').addEventListener('click', () => refreshPool(true));
 $('update-modal-later').addEventListener('click', () => {
   if ($('update-modal-skip').checked && updateModalInfo.latest && hasBridge('dismissUpdate')) bridge.dismissUpdate({ latest: updateModalInfo.latest });
   hideUpdateModal();
@@ -647,9 +722,9 @@ setTheme(state.theme); populateSettings(); updateService(); renderModels(); rend
 refreshPoints(true);
 if (nativeService) {
   $('service-toggle').disabled = true;
-  bridge.getStatus().then(status => { state.running = status.running === true; if (status.variant) state.variant = status.variant === 'portable' ? 'portable' : 'setup'; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) { document.querySelector('.rail-version').textContent = 'v' + status.version; $('update-current').textContent = 'v' + status.version; } $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); refreshPoints(true); if (state.page === 'points') fetchBillsData(); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
+  bridge.getStatus().then(status => { state.running = status.running === true; if (status.variant) state.variant = status.variant === 'portable' ? 'portable' : 'setup'; if (status.settings) Object.assign(state.settings, status.settings); if (!(Number.isInteger(state.settings.port) && state.settings.port >= 1024 && state.settings.port <= 65535)) state.settings.port = 8317; if (status.version) { document.querySelector('.rail-version').textContent = 'v' + status.version; $('update-current').textContent = 'v' + status.version; } $('log-lines').replaceChildren(); state.logCount = 0; if (Array.isArray(status.logs)) status.logs.forEach(entry => addLog(String(entry.line || entry.message || ''), entry.stream === 'err' ? 'error' : 'info')); addLog('已连接本机服务进程'); populateSettings(); updateService(); applyUpstream({ upstream: status.upstream, models: status.models, tokenExpiresAt: status.tokenExpiresAt, defaultModel: status.defaultModel }); refreshPoints(true); refreshPool(true); if (state.page === 'points') fetchBillsData(); }).catch(() => { state.running = false; updateService(); addLog('无法读取本机服务状态', 'error'); });
   if (typeof bridge.onLog === 'function') bridge.onLog(entry => addLog(String(entry.message || ''), entry.level || 'info'));
-  if (typeof bridge.onState === 'function') bridge.onState(st => { if (st.state === 'error' && st.error) addLog(st.error, 'error'); if (state.busy) return; const running = st.state === 'running'; if (state.running !== running) { state.running = running; updateService(); addLog(running ? '服务已启动' : '服务已停止'); if (running) { refreshPoints(true); if (state.page === 'points') fetchBillsData(); } } });
-  if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok) { applyUpstream(h); refreshPoints(); if (state.page === 'points' && Date.now() - billsState.fetchedAt > 30000) fetchBillsData(); } });
-  $('credentials-note').textContent = '账户凭据交由桌面应用处理；主题、端口与启动偏好保存在本机。';
+  if (typeof bridge.onState === 'function') bridge.onState(st => { if (st.state === 'error' && st.error) addLog(st.error, 'error'); if (state.busy) return; const running = st.state === 'running'; if (state.running !== running) { state.running = running; updateService(); addLog(running ? '服务已启动' : '服务已停止'); if (running) { refreshPoints(true); refreshPool(true); if (state.page === 'points') fetchBillsData(); } } });
+  if (typeof bridge.onHealth === 'function') bridge.onHealth(h => { if (h.ok) { applyUpstream(h); refreshPoints(); if (state.page === 'settings') refreshPool(); if (state.page === 'points' && Date.now() - billsState.fetchedAt > 30000) fetchBillsData(); } });
+  $('credentials-note').textContent = '端口、密钥与启动偏好保存在本机;账号通过微信扫码授权写入 accounts.json。';
 } else if (state.settings.autoStart) addLog('演示：已按启动偏好开启服务');

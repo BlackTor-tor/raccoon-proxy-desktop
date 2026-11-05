@@ -17,3 +17,5 @@ docs/
 .usage.json
 .checkin
 .device.json
+.checkin.json
+accounts.json

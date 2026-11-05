@@ -5,10 +5,17 @@ const http = require('http');
 const { fork } = require('child_process');
 const { checkForUpdate, downloadFile, RELEASES_PAGE } = require('./updater');
 
+// 自检支持:用独立 userData 目录运行,避免读写真实配置
+if (process.env.XHX_USER_DATA) {
+  try {
+    app.setPath('userData', process.env.XHX_USER_DATA);
+  } catch {}
+}
+
 // 渲染进程桥接契约(window.raccoonProxy):
 //   getStatus() -> {running, port, tokenExpiresAt, settings, version}
 //   startService()/stopService() -> {ok, error?}
-//   saveSettings(value) -> {ok}   value={countryCode, phone, password, port, apiKey, autoStart}
+//   saveSettings(value) -> {ok}   value={port, apiKey, autoStart}
 //   checkUpdate() -> {ok, updateAvailable, current, latest, downloadUrl, pageUrl}
 //   downloadUpdate({url, latest}) -> {ok, started}   进度经 onUpdateProgress 推送
 //   installUpdate() -> {ok} / openReleases() -> {ok}
@@ -16,9 +23,6 @@ const { checkForUpdate, downloadFile, RELEASES_PAGE } = require('./updater');
 //   onUpdateAvailable(cb) cb({latest, current})  后台发现新版本时推送(渲染层弹窗)
 //   onLog(cb) cb({message, level}) / onState(cb) cb({state, error}) / onHealth(cb) cb({ok, tokenExpiresAt})
 const DEFAULTS = {
-  phone: '',
-  password: '',
-  countryCode: '+86',
   port: 8317,
   apiKey: '',
   autoStart: true,
@@ -87,20 +91,12 @@ function iconPath() {
 
 function startProxy() {
   if (child) return { ok: true };
-  if (!settings.phone || !settings.password) {
-    const msg = '账号未配置:请先在「设置」页填写手机号与密码';
-    setState('error', msg);
-    appendLog(msg, 'err');
-    return { ok: false, error: msg };
-  }
   setState('starting');
   const env = {
     ...process.env,
     PORT: String(settings.port),
     HOST: '127.0.0.1',
-    XHX_PHONE: settings.phone,
-    XHX_PASSWORD: settings.password,
-    XHX_NATION_CODE: settings.countryCode || '+86',
+    XHX_ACCOUNTS_FILE: path.join(app.getPath('userData'), 'accounts.json'),
     PROXY_API_KEY: settings.apiKey || '',
     XHX_TOKEN_FILE: path.join(app.getPath('userData'), 'token.cache'),
     XHX_CHECKIN_FILE: path.join(app.getPath('userData'), 'checkin.json'),
@@ -176,7 +172,7 @@ function healthCheck() {
         lastUpstream = json.upstream || lastUpstream;
         lastModels = json.models || lastModels;
         if (state === 'starting') setState('running');
-        send('proxy:health', { ok: true, tokenExpiresAt: lastTokenExp, upstream: json.upstream, models: json.models, defaultModel: json.default_model });
+        send('proxy:health', { ok: true, tokenExpiresAt: lastTokenExp, upstream: json.upstream, models: json.models, defaultModel: json.default_model, pool: json.pool });
       } catch {
         send('proxy:health', { ok: false });
       }
@@ -305,6 +301,7 @@ ipcMain.handle('app:status', () => ({
   state,
   error: lastError,
   port: settings.port,
+  settings, // 渲染层以主进程保存的配置为准(端口/密钥),避免与 localStorage 不一致
   tokenExpiresAt: lastTokenExp,
   upstream: lastUpstream,
   models: lastModels,
@@ -319,13 +316,17 @@ ipcMain.handle('service:stop', async () => {
   return { ok: true };
 });
 
+// 打开本机扫码授权页(浏览器中扫码,授权写入本机 accounts.json)
+ipcMain.handle('app:open-auth-page', async () => {
+  if (!child) return { ok: false, error: '请先开启服务,再扫码添加账号' };
+  await shell.openExternal(`http://127.0.0.1:${settings.port}/auth/add`);
+  return { ok: true };
+});
+
 // 只负责持久化;是否重启服务由渲染端按运行状态编排(stop -> save -> start)
 // skipVersion 不是表单字段,原地保留,避免保存设置时把「不再提醒」抹掉
 ipcMain.handle('settings:save', (_e, v) => {
   settings = {
-    countryCode: /^\+\d{1,4}$/.test(String(v.countryCode || '').trim()) ? String(v.countryCode).trim() : '+86',
-    phone: String(v.phone ?? '').trim(),
-    password: String(v.password ?? ''),
     port: Math.min(65535, Math.max(1024, Math.floor(Number(v.port)) || 8317)),
     apiKey: String(v.apiKey ?? '').trim(),
     autoStart: v.autoStart === true,

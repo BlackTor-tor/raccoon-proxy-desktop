@@ -4,6 +4,7 @@ contextBridge.exposeInMainWorld('raccoonProxy', {
   getStatus: () => ipcRenderer.invoke('app:status'),
   startService: () => ipcRenderer.invoke('service:start'),
   stopService: () => ipcRenderer.invoke('service:stop'),
+  openAuthPage: () => ipcRenderer.invoke('app:open-auth-page'),
   saveSettings: (value) => ipcRenderer.invoke('settings:save', value),
   onLog: (cb) => {
     ipcRenderer.on('proxy:log', (_e, entry) => cb({ message: entry.line, level: entry.stream === 'err' ? 'error' : 'info' }));

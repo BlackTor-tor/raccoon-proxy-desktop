@@ -1,7 +1,7 @@
 {
   "name": "raccoon-proxy-desktop",
   "productName": "RaccoonProxy",
-  "version": "1.9.1",
+  "version": "1.10.0",
   "description": "RaccoonProxy — 本地 OpenAI 兼容 API 网关桌面客户端",
   "main": "electron-main.js",
   "author": "BlackTor-tor",
@@ -28,9 +28,10 @@
       "preload.js",
       "updater.js",
       "renderer/**",
-      "proxy/**",
       "assets/**",
-      "package.json"
+      "package.json",
+      "proxy/**",
+      "!proxy/.*"
     ],
     "win": {
       "icon": "assets/icon.png",

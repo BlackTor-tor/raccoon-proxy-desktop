@@ -129,23 +129,15 @@
       <div class="content narrow">
         <form id="settings-form" novalidate>
           <section class="block">
-            <h2>账户连接</h2>
-            <p class="hint">用于验证上游访问权限,只保存在本机。</p>
-            <div class="form-grid">
-              <div class="field">
-                <label for="country-code">区号</label>
-                <input id="country-code" type="tel" value="+86" maxlength="5" inputmode="tel">
-              </div>
-              <div class="field">
-                <label for="phone">手机号</label>
-                <input id="phone" type="tel" autocomplete="off" placeholder="请输入手机号" maxlength="15" inputmode="numeric">
-                <p class="error" id="phone-error" role="alert"></p>
-              </div>
-              <div class="field wide">
-                <label for="password">密码</label>
-                <div class="with-btn"><input id="password" type="password" autocomplete="off" placeholder="请输入账户密码"><button type="button" class="icon-ghost" data-reveal="password" aria-label="显示密码" title="显示密码"><svg class="icon" aria-hidden="true"><use href="#i-eye"/></svg></button></div>
-                <p class="error" id="password-error" role="alert"></p>
-              </div>
+            <h2>账号池 <span class="sub" id="pool-summary">—</span></h2>
+            <p class="hint">用微信扫码授权添加账号;多账号自动按「最少并发」调度,撞限速或额度耗尽时自动换号。</p>
+            <div class="pool-list" id="pool-list"><p class="hint" id="pool-empty">开启服务后可查看账号</p></div>
+            <div class="pool-actions">
+              <span class="hint">授权信息仅保存在本机 accounts.json</span>
+              <span class="update-actions">
+                <button type="button" class="btn ghost" id="pool-refresh"><svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>刷新</button>
+                <button type="button" class="btn primary" id="pool-add"><svg class="icon" aria-hidden="true"><use href="#i-plus"/></svg>扫码添加账号</button>
+              </span>
             </div>
           </section>
           <section class="block">
@@ -174,7 +166,7 @@
             <button type="button" class="switch" id="auto-start" role="switch" aria-checked="true" aria-label="应用启动时自动开启服务"></button>
           </section>
           <div class="form-actions">
-            <span class="hint" id="credentials-note">账户凭据交由桌面应用处理;主题、端口与启动偏好保存在本机。</span>
+            <span class="hint" id="credentials-note">端口、密钥与启动偏好保存在本机;账号通过微信扫码授权写入 accounts.json。</span>
             <button type="submit" class="btn primary" id="save-settings"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>保存设置</button>
           </div>
           <p class="saved" id="save-result" role="status" hidden></p>
