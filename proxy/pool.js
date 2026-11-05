@@ -546,6 +546,7 @@ class AccountPool {
       name: session.name || data.name || (data.phone ? maskPhone(data.phone) : '') || '新账号',
       phone: data.phone || '',
       id: session.accountId || jwtPayload(token)?.sub,
+      authVia: 'qr',
     });
     this.log(`账号 ${account.name} 授权成功 (到期 ${Number.isFinite(account.tokenExp) ? new Date(account.tokenExp).toISOString() : '?'})`);
     this.refreshBalance(account, true).catch(() => {});

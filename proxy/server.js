@@ -820,8 +820,11 @@ async function poll() {
     const st = j.session;
     if (st && st.status === 'success') {
       document.getElementById('dot').className = 'dot ok';
-      document.getElementById('msg').textContent = '授权成功!账号已加入池中,可关闭本页。';
-      setTimeout(() => location.reload(), 3000);
+      document.getElementById('msg').textContent = '授权成功!' + (st.name ? '账号「' + st.name + '」' : '账号') + '已加入账号池,可关闭本页。';
+      document.getElementById('meta').textContent = '回到客户端「设置 → 账号池」点「刷新」即可看到最新状态。';
+      document.getElementById('qr').innerHTML = '';
+      document.getElementById('again').textContent = '再添加一个账号';
+      document.getElementById('again').style.display = 'inline-block';
       return;
     }
     if (st && st.status !== 'pending') {
