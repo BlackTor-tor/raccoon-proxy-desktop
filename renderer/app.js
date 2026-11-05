@@ -199,6 +199,7 @@ async function saveSettings(event) {
 /* ---------- 软件更新 ---------- */
 
 const RELEASES_PAGE_URL = 'https://github.com/BlackTor-tor/raccoon-proxy-desktop/releases/latest';
+const REPO_URL = 'https://github.com/BlackTor-tor/raccoon-proxy-desktop';
 const updateInfo = { latest: '', downloadUrl: '', variant: 'setup', sha256: '' };
 const fmtMB = (n) => (n / 1048576).toFixed(1) + ' MB';
 const hasBridge = (fn) => !!(bridge && typeof bridge[fn] === 'function');
@@ -690,6 +691,11 @@ $('checkin-btn').addEventListener('click', checkinNow);
 $('bills-refresh').addEventListener('click', () => fetchBillsData());
 $('pool-add').addEventListener('click', addAccountViaQr);
 $('pool-refresh').addEventListener('click', () => refreshPool(true));
+$('github-link').addEventListener('click', (event) => {
+  event.preventDefault();
+  if (hasBridge('openRepo')) { bridge.openRepo(); return; }
+  window.open(REPO_URL, '_blank', 'noopener');
+});
 $('update-modal-later').addEventListener('click', () => {
   if ($('update-modal-skip').checked && updateModalInfo.latest && hasBridge('dismissUpdate')) bridge.dismissUpdate({ latest: updateModalInfo.latest });
   hideUpdateModal();

@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const http = require('http');
 const { fork } = require('child_process');
-const { checkForUpdate, downloadFile, RELEASES_PAGE } = require('./updater');
+const { checkForUpdate, downloadFile, RELEASES_PAGE, REPO } = require('./updater');
 
 // 自检支持:用独立 userData 目录运行,避免读写真实配置
 if (process.env.XHX_USER_DATA) {
@@ -320,6 +320,12 @@ ipcMain.handle('service:stop', async () => {
 ipcMain.handle('app:open-auth-page', async () => {
   if (!child) return { ok: false, error: '请先开启服务,再扫码添加账号' };
   await shell.openExternal(`http://127.0.0.1:${settings.port}/auth/add`);
+  return { ok: true };
+});
+
+// 打开项目 GitHub 仓库(右上角图标)
+ipcMain.handle('app:open-repo', async () => {
+  await shell.openExternal(`https://github.com/${REPO}`);
   return { ok: true };
 });
 
