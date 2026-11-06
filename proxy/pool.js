@@ -28,8 +28,8 @@ const LEGACY_DEVICE_FILE = process.env.XHX_DEVICE_FILE || path.join(__dirname, '
 
 const DEFAULT_CONCURRENCY = Number(process.env.XHX_ACCOUNT_CONCURRENCY) || 2; // 每账号在飞请求上限
 const LOW_BALANCE = Number(process.env.XHX_LOW_BALANCE) || 50; // 低于该积分降权
-const COOLDOWN_BASE_MS = Number(process.env.XHX_COOLDOWN_MS) || 60 * 1000;
-const COOLDOWN_MAX_MS = 10 * 60 * 1000;
+const COOLDOWN_BASE_MS = Number(process.env.XHX_COOLDOWN_MS) || 20 * 1000; // 撞限速的基础冷却
+const COOLDOWN_MAX_MS = Number(process.env.XHX_COOLDOWN_MAX_MS) || 2 * 60 * 1000; // 指数退避上限
 const AUTH_POLL_MIN_MS = 1000;
 const AUTH_POLL_MAX_MS = 60 * 1000;
 const QR_APPNAME = process.env.XHX_QR_APPNAME || '商汤小浣熊';
@@ -344,6 +344,32 @@ class AccountPool {
   /** 账号当前调度状态 */
   statusOf(account) {
     return this._state(account.id).status;
+  }
+
+  /**
+   * 距离「至少有一个账号可接单」还有多久(毫秒);有账号立即可用返回 0,没有可恢复的账号返回 null
+   * 用于全池冷却时决定「等一会儿再试」还是直接返回 429
+   */
+  nextReadyIn() {
+    const now = Date.now();
+    let soonest = null;
+    for (const a of this.accounts) {
+      if (!a.enabled) continue;
+      const st = this._state(a.id);
+      if (st.status === 'needs_auth' || st.status === 'exhausted') continue;
+      if (!this._tokenUsable(a)) continue;
+      if (st.status === 'cooldown') {
+        const wait = Math.max(0, st.cooldownUntil - now);
+        if (soonest === null || wait < soonest) soonest = wait;
+        continue;
+      }
+      if (st.inFlight >= this.concurrency) {
+        if (soonest === null || soonest > 1000) soonest = 1000;
+        continue;
+      }
+      return 0;
+    }
+    return soonest;
   }
 
   setEnabled(id, enabled) {

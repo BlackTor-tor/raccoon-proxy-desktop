@@ -46,6 +46,7 @@ const PORT = Number(process.env.PORT || 8317);
 const HOST = process.env.HOST || '127.0.0.1';
 const PROXY_API_KEY = process.env.PROXY_API_KEY || '';
 const MAX_CHAT_ATTEMPTS = Math.max(2, Number(process.env.XHX_MAX_ATTEMPTS) || 4); // 一次请求最多换几个号
+const COOLDOWN_WAIT_MS = Number(process.env.XHX_COOLDOWN_WAIT_MS) || 25 * 1000; // 全池冷却时最多等多久再重试
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -619,10 +620,24 @@ async function proxyChat(req, res) {
   const tried = new Set();
   let lastFailure = null;
   let badGatewayRetries = 0;
+  let attempts = 0;
+  let waitedForCooldown = false;
 
-  for (let attempt = 0; attempt < MAX_CHAT_ATTEMPTS; attempt++) {
+  while (attempts < MAX_CHAT_ATTEMPTS) {
     const account = pool.pick(tried);
-    if (!account) break;
+    if (!account) {
+      // 全池暂时不可用:若最近的可恢复时间不长(如撞限速冷却),先等一会儿再试,避免直接失败整轮对话
+      const waitMs = pool.nextReadyIn();
+      if (!waitedForCooldown && waitMs != null && waitMs <= COOLDOWN_WAIT_MS) {
+        waitedForCooldown = true;
+        tried.clear();
+        log(`账号池暂不可用,${Math.max(1, Math.ceil(waitMs / 1000))}s 后重试`);
+        await new Promise((r) => setTimeout(r, Math.max(300, waitMs + 150)));
+        continue;
+      }
+      break;
+    }
+    attempts++;
     tried.add(account.id);
     pool.acquire(account);
 
@@ -750,12 +765,62 @@ async function proxyChat(req, res) {
     return;
   }
 
-  // 全池不可用:快速失败,不做重试轰炸
+  // 全池不可用:按原因返回精确状态码,便于客户端正确退避(而不是一律 503)
   const summary = pool.summary();
-  const detail = lastFailure ? `最后错误: ${String(lastFailure.message || lastFailure.kind).slice(0, 200)}` : '没有可用账号';
+  const detail = lastFailure ? String(lastFailure.message || lastFailure.kind).slice(0, 160) : '';
+  const cooling = pool.accounts.filter((a) => a.enabled && pool.statusOf(a) === 'cooldown');
+  const needsAuth = pool.accounts.filter((a) => a.enabled && pool.statusOf(a) === 'needs_auth');
+  const exhausted = pool.accounts.filter((a) => a.enabled && pool.statusOf(a) === 'exhausted');
+
+  // 1) 只是撞限速冷却:429 + Retry-After,客户端可退避重试
+  if (!needsAuth.length && !exhausted.length && cooling.length) {
+    const retryAfter = Math.max(1, Math.ceil((pool.nextReadyIn() || 0) / 1000));
+    const body = JSON.stringify({
+      error: {
+        message: `上游提示请求频率超限,账号冷却中,请约 ${retryAfter} 秒后重试`,
+        type: 'rate_limit_error',
+        code: 'account_rate_limited',
+        retry_after: retryAfter,
+        ...(detail ? { detail } : {}),
+        pool: summary,
+      },
+    });
+    res.writeHead(429, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Length': Buffer.byteLength(body),
+      'Retry-After': String(retryAfter),
+      'Access-Control-Allow-Origin': '*',
+    });
+    return res.end(body);
+  }
+
+  // 2) 额度耗尽:429 insufficient_quota(非临时错误,不建议重试)
+  if (!needsAuth.length && !cooling.length && exhausted.length) {
+    return sendJson(res, 429, {
+      error: {
+        message: '全部账号今日额度已用尽(积分不足),请明天再试或扫码添加新账号',
+        type: 'insufficient_quota',
+        code: 'pool_exhausted',
+        pool: summary,
+      },
+    });
+  }
+
+  // 3) 授权失效:明确提示重新扫码
+  if (needsAuth.length && !cooling.length && !exhausted.length) {
+    return sendJson(res, 503, {
+      error: {
+        message: `全部账号授权已失效,请在设置页「账号池」重新扫码授权(${needsAuth.map((a) => a.name).join('、')})`,
+        type: 'pool_auth_required',
+        code: 'pool_auth_required',
+        pool: summary,
+      },
+    });
+  }
+
   sendJson(res, 503, {
     error: {
-      message: `账号池无可用账号(${detail})。请在设置页「账号池」中扫码添加/续期账号`,
+      message: `账号池无可用账号${detail ? `(${detail})` : ''}。请在设置页「账号池」中扫码添加/续期账号`,
       type: 'pool_unavailable',
       pool: summary,
     },
