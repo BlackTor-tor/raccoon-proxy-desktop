@@ -70,8 +70,11 @@
             <div class="kv">
               <span class="k">Base URL</span><span class="v mono" id="base-url">http://127.0.0.1:8317/v1</span><button type="button" class="copy" id="copy-base-url">复制</button>
               <span class="k">API Key</span><span class="v mono" id="api-key-display">未设置 · 无需鉴权</span><button type="button" class="icon-ghost" id="reveal-key" aria-label="显示 API Key" title="显示 API Key" hidden><svg class="icon" aria-hidden="true"><use href="#i-eye"/></svg></button><button type="button" class="copy" id="copy-api-key">复制</button>
+              <span class="k">Chat</span><span class="v mono" id="endpoint-chat">http://127.0.0.1:8317/v1/chat/completions</span><button type="button" class="copy" id="copy-endpoint-chat">复制</button>
+              <span class="k">Anthropic</span><span class="v mono" id="endpoint-anthropic">http://127.0.0.1:8317/v1/messages</span><button type="button" class="copy" id="copy-endpoint-anthropic">复制</button>
+              <span class="k">Responses</span><span class="v mono" id="endpoint-responses">http://127.0.0.1:8317/v1/responses</span><button type="button" class="copy" id="copy-endpoint-responses">复制</button>
             </div>
-            <p class="hint" id="key-hint">若工具要求必填,可填入任意非空占位值</p>
+            <p class="hint" id="key-hint">Chat / Anthropic / Responses 三套协议同一个端口;Claude Code 填 Anthropic 那一行,Codex CLI 填 Responses 那一行</p>
           </section>
           <section class="block grow">
             <h2>可用模型 <span class="sub" id="models-note">来自上游实时目录,点击行复制模型 ID</span></h2>

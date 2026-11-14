@@ -94,6 +94,10 @@ function updateService() {
   $('service-dot').classList.toggle('off', !state.running);
   $('listen-address').textContent = `127.0.0.1:${state.settings.port}`; $('base-url').textContent = baseUrl();
   $('log-port').textContent = state.settings.port; $('chat-endpoint').textContent = `127.0.0.1:${state.settings.port}/v1/chat/completions`;
+  const origin = `http://127.0.0.1:${state.settings.port}`;
+  $('endpoint-chat').textContent = `${origin}/v1/chat/completions`;
+  $('endpoint-anthropic').textContent = `${origin}/v1/messages`;
+  $('endpoint-responses').textContent = `${origin}/v1/responses`;
   $('api-key-display').textContent = state.settings.apiKey ? (state.keyVisible ? state.settings.apiKey : '••••••••••••••••') : '未设置 · 无需鉴权';
   $('reveal-key').hidden = !state.settings.apiKey; $('copy-api-key').disabled = !state.settings.apiKey;
   $('copy-api-key').title = state.settings.apiKey ? '复制 API Key' : '尚未设置 API Key';
@@ -712,6 +716,7 @@ document.querySelectorAll('[data-reveal]').forEach(el => el.addEventListener('cl
 $('theme-toggle').addEventListener('click', () => setTheme(state.theme === 'light' ? 'dark' : 'light'));
 $('service-toggle').addEventListener('click', toggleService);
 $('copy-base-url').addEventListener('click', () => copy(baseUrl(), ' Base URL', $('copy-base-url')));
+['chat', 'anthropic', 'responses'].forEach((name) => { $(`copy-endpoint-${name}`).addEventListener('click', () => copy($(`endpoint-${name}`).textContent, '接口地址', $(`copy-endpoint-${name}`))); });
 $('copy-api-key').addEventListener('click', () => { if (state.settings.apiKey) copy(state.settings.apiKey, ' API Key', $('copy-api-key')); });
 $('reveal-key').addEventListener('click', () => { state.keyVisible = !state.keyVisible; $('reveal-key').setAttribute('aria-label', state.keyVisible ? '隐藏 API Key' : '显示 API Key'); $('reveal-key').title = state.keyVisible ? '隐藏 API Key' : '显示 API Key'; updateService(); });
 $('clear-logs').addEventListener('click', () => { $('log-lines').replaceChildren(); const empty = document.createElement('div'); empty.className = 'log-empty'; empty.textContent = '日志已清空,等待新的请求…'; $('log-lines').appendChild(empty); state.logCount = 0; $('log-count').textContent = '0 条'; toast('日志已清空'); });

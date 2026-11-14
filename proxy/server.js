@@ -17,6 +17,7 @@ const http = require('http');
 const https = require('https');
 const { AccountPool, classifyUpstream, parseRetryAfter, jwtExp } = require('./pool');
 const qrCodec = require('./qr');
+const protocols = require('./protocols');
 
 const UPSTREAM_HOST = 'xiaohuanxiong.com';
 const CONFIRM_URL_PATH = '/api/web/auth/v1/iam/confirm';
@@ -59,6 +60,8 @@ const USER_AGENT =
 const PORT = Number(process.env.PORT || 8317);
 const HOST = process.env.HOST || '127.0.0.1';
 const PROXY_API_KEY = process.env.PROXY_API_KEY || '';
+// 上游是文本模型:默认把图片降级成占位文字,置 XHX_VISION=1 才原样转发 image_url
+const XHX_VISION = /^(1|true|yes|on)$/i.test(process.env.XHX_VISION || '');
 const MAX_CHAT_ATTEMPTS = Math.max(2, Number(process.env.XHX_MAX_ATTEMPTS) || 4); // 一次请求最多换几个号
 const MAX_XEXT_RETRIES = Math.max(1, Number(process.env.XHX_XEXT_RETRIES) || 12); // v1 通道 x_ext 500 的原地重试上限
 const COOLDOWN_WAIT_MS = Number(process.env.XHX_COOLDOWN_WAIT_MS) || 25 * 1000; // 全池冷却时最多等多久再重试
@@ -598,6 +601,15 @@ const FALLBACK_MODELS = [
 
 // ---- 上游模型目录 + 账号状态探针(目录 GET 不消耗积分) ----
 let catalogCache = { at: 0, models: null, defaultModel: null };
+
+/** 协议适配层要用到的两个「本文件差异点」,CLI 版各自实现,其余代码保持一致 */
+function catalogModelIds() {
+  return (catalogCache.models || []).map((m) => m.id);
+}
+
+function resolveDefaultModel() {
+  return catalogCache.defaultModel || DEFAULT_MODEL;
+}
 let upstreamStatus = { state: 'checking', checkedAt: null, error: '', modelCount: 0 };
 let upstreamCheckInFlight = null;
 
@@ -740,7 +752,12 @@ function sendHtml(res, status, html) {
 function authorized(req) {
   if (!PROXY_API_KEY) return true;
   const auth = req.headers.authorization || '';
-  const key = auth.replace(/^Bearer\s+/i, '').trim() || new URL(req.url, 'http://x').searchParams.get('key') || '';
+  // Anthropic 协议的客户端走 x-api-key,OpenAI 系走 Authorization
+  const key =
+    auth.replace(/^Bearer\s+/i, '').trim() ||
+    String(req.headers['x-api-key'] || '').trim() ||
+    new URL(req.url, 'http://x').searchParams.get('key') ||
+    '';
   return key === PROXY_API_KEY;
 }
 
@@ -806,32 +823,25 @@ async function chatOnce(account, channel, jsonBody) {
  * 对话转发:最少并发选号 → 通道内失败处理 → 撞限速降级/换号 → 成功即流式输出
  * 换号与降级都发生在响应头之前,客户端无感知
  */
-async function proxyChat(req, res) {
-  let body;
-  try {
-    body = await readRequestBody(req);
-  } catch (e) {
-    return sendJson(res, 413, { error: { message: e.message, type: 'invalid_request_error' } });
-  }
+// ---------------------------------------------------------------- 统一对话核心
 
-  let payload;
-  try {
-    payload = JSON.parse(body);
-  } catch {
-    return sendJson(res, 400, { error: { message: 'invalid JSON body', type: 'invalid_request_error' } });
-  }
-  if (!Array.isArray(payload.messages)) {
-    return sendJson(res, 400, { error: { message: 'messages must be an array', type: 'invalid_request_error' } });
-  }
-  if (typeof payload.model !== 'string' || !payload.model) payload.model = catalogCache.defaultModel || DEFAULT_MODEL;
-
-  const isStream = payload.stream === true;
+/**
+ * 对话核心:选号 → 通道尝试 → 限流降级 → 把上游结果原样交给调用方
+ *
+ * 协议差异全部交给调用方,本函数只负责「从上游拿到一份结果」:
+ *   onResult(meta)  上游给的是完整 JSON(v1 降级,或客户端本来就要非流式)
+ *   onStream(meta)  上游给的是 SSE,调用方自己消费 meta.upstream
+ * 换号与降级都发生在响应头之前,所以调用方看不到中间过程。
+ *
+ * @returns {{ok:true}|{ok:false,status:number,body:string,headers?:object}}
+ */
+async function runChatCore(payload, { res, onResult, onStream }) {
   const jsonBody = JSON.stringify(payload);
   // 降级到 v1 的请求体: 模型换成默认模型(v1 只认它), 且必须 stream:false
   // 实测 v1 对 stream:true 稳定 500(0/10), 非流式则约五成可通;
-  // 客户端要流式时由本代理把整包 JSON 拆成 SSE 帧回放
-  const wantStream = payload.stream === true;
-  const fallbackBody = JSON.stringify({ ...payload, model: DEFAULT_MODEL, stream: false });
+  // 客户端要流式时由调用方把整包 JSON 拆成 SSE 帧回放
+  const { stream_options: _streamOptions, ...fallbackPayload } = payload;
+  const fallbackBody = JSON.stringify({ ...fallbackPayload, model: DEFAULT_MODEL, stream: false });
   const canFallback = payload.model !== DEFAULT_MODEL;
 
   const tried = new Set();
@@ -887,46 +897,22 @@ async function proxyChat(req, res) {
           break;
         }
 
-        log(`[${account.name}] ${channel.id} upstream ${r.status} (stream=${isStream}, model=${channel.id === 'v1' ? DEFAULT_MODEL : payload.model})`);
-
         if (r.ok) {
-          log(`[${account.name}] ${channel.id} upstream ${r.status} ok in ${Date.now() - started}ms`);
+          log(`[${account.name}] ${channel.id} 上游 ${r.status} 成功 in ${Date.now() - started}ms`);
           // 降级改写过模型时,用响应头告知客户端实际模型
-          const modelHeader = channel.id === 'v1' && canFallback ? { 'X-Raccoon-Model-Fallback': DEFAULT_MODEL } : {};
           const usedModel = channel.id === 'v1' && canFallback ? DEFAULT_MODEL : payload.model;
+          const modelHeader = channel.id === 'v1' && canFallback ? { 'X-Raccoon-Model-Fallback': DEFAULT_MODEL } : {};
           if (!r.stream) {
-            // 成功(非流式):记录 usage 后返回;客户端原本要流式则把整包拆成 SSE 回放
+            // 成功(非流式):记录 usage 后把整包交给调用方
             pool.markSuccess(account);
             const usage = extractUsage(r.ct, r.text);
             if (usage) recordUsage({ account, model: usedModel, usage });
             release();
-            if (wantStream) {
-              const sse = replayAsSse(r.text, payload.model);
-              if (sse) {
-                log(`[${account.name}] ${channel.id} 非流式结果已回放为 SSE`);
-                res.writeHead(200, {
-                  'Cache-Control': 'no-store',
-                  'Access-Control-Allow-Origin': '*',
-                  'Content-Type': 'text/event-stream; charset=utf-8',
-                  'X-Raccoon-Sse-Replay': '1',
-                  ...modelHeader,
-                });
-                res.end(sse);
-                return;
-              }
-            }
-            res.writeHead(r.status, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'Content-Type': r.ct || 'application/json; charset=utf-8', ...modelHeader });
-            res.end(r.text);
-            return;
+            onResult({ status: r.status, ct: r.ct, text: r.text, model: usedModel, requestModel: payload.model, extraHeaders: modelHeader });
+            return { ok: true };
           }
           // 流式成功:边转发边留存,结束后记录 usage
           pool.markSuccess(account);
-          res.writeHead(r.status, {
-            'Cache-Control': 'no-store',
-            'Access-Control-Allow-Origin': '*',
-            ...(r.ct ? { 'Content-Type': r.ct } : {}),
-            ...modelHeader,
-          });
           const captured = [];
           let capturedSize = 0;
           r.upstream.on('data', (chunk) => {
@@ -940,13 +926,10 @@ async function proxyChat(req, res) {
             if (usage) recordUsage({ account, model: usedModel, usage });
             release();
           });
-          r.upstream.on('error', () => {
-            release();
-            res.destroy();
-          });
+          r.upstream.on('error', release);
           res.on('close', release);
-          r.upstream.pipe(res);
-          return;
+          onStream({ status: r.status, ct: r.ct, upstream: r.upstream, model: usedModel, requestModel: payload.model, extraHeaders: modelHeader });
+          return { ok: true };
         }
 
         const cls = r.cls;
@@ -998,9 +981,7 @@ async function proxyChat(req, res) {
 
         // 保留上游错误正文,HTTP200里的业务失败不能作为对话成功返回。
         release();
-        res.writeHead(r.status >= 300 ? r.status : 502, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'Content-Type': r.ct || 'application/json; charset=utf-8' });
-        res.end(r.text);
-        return;
+        return { ok: false, status: r.status >= 300 ? r.status : 502, body: r.text, headers: r.ct ? { 'Content-Type': r.ct } : {} };
       }
       if (nextAccount) break;
     }
@@ -1018,56 +999,311 @@ async function proxyChat(req, res) {
   // 1) 只是撞限速冷却:429 + Retry-After,客户端可退避重试
   if (cooling.length) {
     const retryAfter = Math.max(1, Math.ceil((pool.nextReadyIn() || 0) / 1000));
-    const body = JSON.stringify({
-      error: {
-        message: `上游提示请求频率超限,账号冷却中,请约 ${retryAfter} 秒后重试`,
-        type: 'rate_limit_error',
-        code: 'account_rate_limited',
-        retry_after: retryAfter,
-        ...(detail ? { detail } : {}),
-        pool: summary,
-      },
-    });
-    res.writeHead(429, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Content-Length': Buffer.byteLength(body),
-      'Retry-After': String(retryAfter),
-      'Access-Control-Allow-Origin': '*',
-    });
-    return res.end(body);
+    return {
+      ok: false,
+      status: 429,
+      headers: { 'Retry-After': String(retryAfter) },
+      body: JSON.stringify({
+        error: {
+          message: `上游提示请求频率超限,账号冷却中,请约 ${retryAfter} 秒后重试`,
+          type: 'rate_limit_error',
+          code: 'account_rate_limited',
+          retry_after: retryAfter,
+          ...(detail ? { detail } : {}),
+          pool: summary,
+        },
+      }),
+    };
   }
 
   // 2) 额度耗尽:429 insufficient_quota(非临时错误,不建议重试)
   if (!needsAuth.length && !cooling.length && exhausted.length) {
-    return sendJson(res, 429, {
-      error: {
-        message: '全部账号今日额度已用尽(积分不足),请明天再试或扫码添加新账号',
-        type: 'insufficient_quota',
-        code: 'pool_exhausted',
-        pool: summary,
-      },
-    });
+    return {
+      ok: false,
+      status: 429,
+      body: JSON.stringify({
+        error: {
+          message: '全部账号今日额度已用尽(积分不足),请明天再试或扫码添加新账号',
+          type: 'insufficient_quota',
+          code: 'pool_exhausted',
+          pool: summary,
+        },
+      }),
+    };
   }
 
   // 3) 授权失效:明确提示重新扫码
   if (needsAuth.length && !cooling.length && !exhausted.length) {
-    return sendJson(res, 503, {
-      error: {
-        message: `全部账号授权已失效,请在设置页「账号池」重新扫码授权(${needsAuth.map((a) => a.name).join('、')})`,
-        type: 'pool_auth_required',
-        code: 'pool_auth_required',
-        pool: summary,
-      },
-    });
+    return {
+      ok: false,
+      status: 503,
+      body: JSON.stringify({
+        error: {
+          message: `全部账号授权已失效,请打开 http://${HOST}:${PORT}/auth/add 重新扫码授权(${needsAuth.map((a) => a.name).join('、')})`,
+          type: 'pool_auth_required',
+          code: 'pool_auth_required',
+          pool: summary,
+        },
+      }),
+    };
   }
 
-  sendJson(res, 503, {
-    error: {
-      message: `账号池无可用账号${detail ? `(${detail})` : ''}。请在设置页「账号池」中扫码添加/续期账号`,
-      type: 'pool_unavailable',
-      pool: summary,
+  return {
+    ok: false,
+    status: 503,
+    body: JSON.stringify({
+      error: {
+        message: `账号池无可用账号${detail ? `(${detail})` : ''}。请打开 http://${HOST}:${PORT}/auth/add 扫码添加/续期账号`,
+        type: 'pool_unavailable',
+        pool: summary,
+      },
+    }),
+  };
+}
+
+// ---------------------------------------------------------------- 响应输出小工具
+
+function sseHeaders(extra = {}) {
+  return {
+    'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*',
+    'Content-Type': 'text/event-stream; charset=utf-8',
+    'X-Accel-Buffering': 'no',
+    ...extra,
+  };
+}
+
+/** 原样转发上游状态码与正文(OpenAI 形状,chat 接口用) */
+function sendRawUpstream(res, { status, ct, text, extraHeaders }) {
+  res.writeHead(status, {
+    'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*',
+    'Content-Type': ct || 'application/json; charset=utf-8',
+    ...extraHeaders,
+  });
+  res.end(text);
+}
+
+/** 原样转发上游 SSE 字节流 */
+function pipeUpstreamStream(res, { status, ct, upstream, extraHeaders, onError }) {
+  res.writeHead(status, {
+    'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*',
+    ...(ct ? { 'Content-Type': ct } : {}),
+    ...extraHeaders,
+  });
+  upstream.on('data', (chunk) => {
+    if (!res.write(chunk)) upstream.pause();
+  });
+  res.on('drain', () => upstream.resume());
+  upstream.on('end', () => res.end());
+  if (onError) upstream.on('error', onError);
+  upstream.resume();
+}
+
+/** 核心返回的错误(OpenAI 形状)→ 原样写出 */
+function sendCoreError(res, result) {
+  res.writeHead(result.status, {
+    'Cache-Control': 'no-store',
+    'Access-Control-Allow-Origin': '*',
+    'Content-Type': 'application/json; charset=utf-8',
+    ...(result.headers || {}),
+  });
+  res.end(result.body);
+}
+
+/** 读请求体 + 解析 JSON,失败时用调用方给的形状回错 */
+async function readJsonRequest(req, res, renderError) {
+  let raw;
+  try {
+    raw = await readRequestBody(req);
+  } catch (e) {
+    renderError(413, { error: { message: e.message, type: 'invalid_request_error' } });
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    renderError(400, { error: { message: 'invalid JSON body', type: 'invalid_request_error' } });
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------- /v1/chat/completions
+
+async function proxyChat(req, res) {
+  const payload = await readJsonRequest(req, res, (status, obj) => sendJson(res, status, obj));
+  if (!payload) return;
+
+  if (!Array.isArray(payload.messages)) {
+    return sendJson(res, 400, { error: { message: 'messages must be an array', type: 'invalid_request_error' } });
+  }
+  if (typeof payload.model !== 'string' || !payload.model) payload.model = DEFAULT_MODEL;
+
+  const wantStream = payload.stream === true;
+  const result = await runChatCore(payload, {
+    res,
+    onResult: (r) => {
+      // 客户端要流式但只拿到整包(v1 降级):由本地拆成 SSE 帧回放
+      if (wantStream) {
+        const sse = replayAsSse(r.text, r.requestModel);
+        if (sse) {
+          log(`非流式结果已回放为 SSE`);
+          res.writeHead(200, sseHeaders({ 'X-Raccoon-Sse-Replay': '1', ...r.extraHeaders }));
+          return res.end(sse);
+        }
+      }
+      sendRawUpstream(res, r);
+    },
+    onStream: (r) => pipeUpstreamStream(res, { ...r, onError: () => res.destroy() }),
+  });
+  if (!result.ok) return sendCoreError(res, result);
+}
+
+// ---------------------------------------------------------------- /v1/messages(Anthropic)
+
+async function proxyAnthropic(req, res) {
+  const fail = (status, body) => sendJson(res, status, protocols.anthropicError(status, body));
+  const body = await readJsonRequest(req, res, fail);
+  if (!body) return;
+  if (!Array.isArray(body.messages)) return fail(400, { error: { message: 'messages 必须是数组' } });
+
+  const { payload } = protocols.anthropicToChat(body, {
+    defaultModel: resolveDefaultModel(),
+    catalogIds: catalogModelIds(),
+    vision: XHX_VISION,
+  });
+  if (!payload.messages.length) return fail(400, { error: { message: 'messages 里没有可发送的内容' } });
+
+  const wantStream = body.stream === true;
+  const requestModel = body.model || payload.model;
+
+  const result = await runChatCore(payload, {
+    res,
+    onResult: (r) => {
+      let json = null;
+      try {
+        json = JSON.parse(r.text);
+      } catch {}
+      if (!json) return fail(r.status >= 300 ? r.status : 502, r.text);
+      if (wantStream) {
+        // 上游降级成整包:在本地合成 Anthropic 事件流,客户端无感
+        res.writeHead(200, sseHeaders({ 'X-Raccoon-Sse-Replay': '1', ...r.extraHeaders }));
+        protocols.anthropicStreamFromText(r.text, {
+          model: r.model,
+          requestModel,
+          write: (s) => res.write(s),
+        });
+        return res.end();
+      }
+      sendJson(res, 200, protocols.chatToAnthropic(json, { model: r.model, requestModel }));
+    },
+    onStream: (r) => {
+      res.writeHead(200, sseHeaders(r.extraHeaders || {}));
+      const adapter = protocols.createAnthropicStream({
+        model: r.model,
+        requestModel,
+        write: (s) => {
+          if (!res.write(s)) r.upstream.pause();
+        },
+      });
+      r.upstream.on('data', (chunk) => adapter.push(chunk));
+      res.on('drain', () => r.upstream.resume());
+      // 客户端中断(Claude Code 按 Esc 很常见)时立刻掐掉上游,别白烧额度
+      res.on('close', () => {
+        if (!res.writableEnded) r.upstream.destroy();
+      });
+      r.upstream.on('end', () => {
+        adapter.end();
+        res.end();
+      });
+      r.upstream.on('error', (e) => {
+        adapter.fail(e?.message);
+        res.end();
+      });
+      r.upstream.resume();
     },
   });
+  if (!result.ok) return fail(result.status, result.body);
+}
+
+/** Claude Code 会先问一次 token 数,给个粗略估算即可 */
+function countAnthropicTokens(req, res) {
+  const fail = (status, body) => sendJson(res, status, protocols.anthropicError(status, body));
+  return readJsonRequest(req, res, fail).then((body) => {
+    if (!body) return;
+    sendJson(res, 200, protocols.anthropicCountTokens(body));
+  });
+}
+
+// ---------------------------------------------------------------- /v1/responses(Codex CLI)
+
+async function proxyResponses(req, res) {
+  const fail = (status, body) => sendJson(res, status, protocols.responsesError(status, body));
+  const body = await readJsonRequest(req, res, fail);
+  if (!body) return;
+  if (body.input === undefined || body.input === null) {
+    return fail(400, { error: { message: 'input 不能为空' } });
+  }
+
+  const { payload, customTools } = protocols.responsesToChat(body, {
+    defaultModel: resolveDefaultModel(),
+    catalogIds: catalogModelIds(),
+    vision: XHX_VISION,
+  });
+  if (!payload.messages.length) return fail(400, { error: { message: 'input 里没有可发送的内容' } });
+
+  const wantStream = body.stream === true;
+  const requestModel = body.model || payload.model;
+
+  const result = await runChatCore(payload, {
+    res,
+    onResult: (r) => {
+      let json = null;
+      try {
+        json = JSON.parse(r.text);
+      } catch {}
+      if (!json) return fail(r.status >= 300 ? r.status : 502, r.text);
+      if (wantStream) {
+        res.writeHead(200, sseHeaders({ 'X-Raccoon-Sse-Replay': '1', ...r.extraHeaders }));
+        protocols.responsesStreamFromText(r.text, {
+          model: r.model,
+          request: body,
+          customTools,
+          write: (s) => res.write(s),
+        });
+        return res.end();
+      }
+      sendJson(res, 200, protocols.chatToResponses(json, { model: r.model, request: body, customTools }));
+    },
+    onStream: (r) => {
+      res.writeHead(200, sseHeaders(r.extraHeaders || {}));
+      const adapter = protocols.createResponsesStream({
+        model: r.model,
+        request: body,
+        customTools,
+        write: (s) => {
+          if (!res.write(s)) r.upstream.pause();
+        },
+      });
+      r.upstream.on('data', (chunk) => adapter.push(chunk));
+      res.on('drain', () => r.upstream.resume());
+      // 客户端中断(Claude Code 按 Esc 很常见)时立刻掐掉上游,别白烧额度
+      res.on('close', () => {
+        if (!res.writableEnded) r.upstream.destroy();
+      });
+      r.upstream.on('end', () => {
+        adapter.end();
+        res.end();
+      });
+      r.upstream.on('error', (e) => {
+        adapter.fail(e?.message);
+        res.end();
+      });
+      r.upstream.resume();
+    },
+  });
+  if (!result.ok) return fail(result.status, result.body);
 }
 
 // ---- 本地扫码授权页 ----
@@ -1159,7 +1395,8 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(204, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+      'Access-Control-Allow-Headers':
+        'Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta, anthropic-dangerous-direct-browser-access, openai-beta, x-stainless-lang, x-stainless-os, x-stainless-arch, x-stainless-runtime, x-stainless-runtime-version, x-stainless-package-version, x-stainless-retry-count, x-stainless-timeout',
     });
     return res.end();
   }
@@ -1187,8 +1424,22 @@ const server = http.createServer(async (req, res) => {
       return await proxyChat(req, res);
     }
 
+    // Anthropic Messages:Claude Code / Cline / Roo Code / Zed / Continue…
+    if (route === 'POST /v1/messages' || route === 'POST /messages') {
+      return await proxyAnthropic(req, res);
+    }
+
+    if (route === 'POST /v1/messages/count_tokens' || route === 'POST /messages/count_tokens') {
+      return await countAnthropicTokens(req, res);
+    }
+
+    // OpenAI Responses:Codex CLI、新版 openai SDK
+    if (route === 'POST /v1/responses' || route === 'POST /responses') {
+      return await proxyResponses(req, res);
+    }
+
     if (route === 'GET /health') {
-      const out = { ok: true, upstream: upstreamSnapshot(), models: modelListForApi(), default_model: catalogCache.defaultModel, pool: pool.summary() };
+      const out = { ok: true, upstream: upstreamSnapshot(), models: modelListForApi(), default_model: catalogCache.defaultModel, protocols: ['openai-chat', 'anthropic-messages', 'openai-responses'], pool: pool.summary() };
       const first = pool.pick() || pool.accounts[0] || null;
       out.token_exp = first && isFiniteNum(first.tokenExp) ? new Date(first.tokenExp).toISOString() : null;
       return sendJson(res, 200, out);
@@ -1321,6 +1572,7 @@ const server = http.createServer(async (req, res) => {
     if (!res.headersSent) {
       sendJson(res, e.statusCode || 502, { error: { message: String(e?.message || e), type: e.type || 'proxy_error', ...(e.retryAfter ? { retry_after: e.retryAfter } : {}) } }, e.retryAfter ? { 'Retry-After': String(e.retryAfter), 'Access-Control-Expose-Headers': 'Retry-After' } : {});
     } else {
+      console.error(`[raccoon-proxy] 响应过程中出错(已开始输出,客户端会看到截断): ${e?.stack || e}`);
       res.destroy();
     }
   }

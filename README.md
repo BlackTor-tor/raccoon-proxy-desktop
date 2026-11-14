@@ -4,12 +4,12 @@
 
 本地 OpenAI 兼容 API 网关桌面客户端(Windows)。
 
-内置网关服务进程,把上游大模型以 **OpenAI 兼容 API** 的形式暴露在本地端口——装好即用,无需命令行。任何支持 OpenAI API 的工具(Cursor、Continue、ChatBox、openai SDK……)填一个本地地址即可接入。
+内置网关服务进程,把上游大模型以本地 API 的形式暴露在本地端口——装好即用,无需命令行。同时提供 **OpenAI Chat、Anthropic Messages、OpenAI Responses 三套协议**,Claude Code、Codex CLI、Cline、Roo Code、Zed、ChatBox、openai SDK 等工具填一个本地地址即可接入。
 
 ## 功能
 
 - **一键启停**:仪表盘开关网关服务,关窗最小化到托盘,服务持续运行
-- **OpenAI 兼容**:`/v1/chat/completions`(支持 SSE 流式)、`/v1/models`、`/health`
+- **三套协议同一端口**:`/v1/chat/completions`(OpenAI Chat)、`/v1/messages` + `/v1/messages/count_tokens`(Anthropic)、`/v1/responses`(OpenAI Responses),都支持 SSE 流式与工具调用;另有 `/v1/models`、`/health`
 - **动态模型目录**:模型列表实时来自上游目录(自动刷新,含 GLM-5-3、Kimi-K3、DeepSeek-V4.1-Flash、SenseNova-6.8 等),真实路由到不同模型
 - **上游状态监测**:仪表盘实时显示上游/账号状态(每分钟探测、5 分钟全量刷新),账号授权失效/上游不可达即时提示
 - **扫码授权账号池**:设置页「账号池」用微信扫码授权添加账号(不保存密码、不手工粘 token);多账号按「最少并发」调度,撞限速/额度耗尽/授权失效自动换号,全池不可用时快速失败;token 30 天有效,到期重新扫码续期
@@ -43,6 +43,29 @@ resp = client.chat.completions.create(
 print(resp.choices[0].message.content)
 ```
 
+接入其他客户端:
+
+```bash
+# Claude Code / Cline / Roo Code / Zed(Anthropic 协议)
+export ANTHROPIC_BASE_URL=http://127.0.0.1:8317
+export ANTHROPIC_AUTH_TOKEN=any-key
+claude
+```
+
+```toml
+# Codex CLI:~/.codex/config.toml
+model = "gpt-5-codex"
+model_provider = "raccoon"
+
+[model_providers.raccoon]
+name = "RaccoonProxy"
+base_url = "http://127.0.0.1:8317/v1"
+env_key = "RACCOON_API_KEY"
+wire_api = "responses"
+```
+
+> Anthropic 系客户端用 `x-api-key`,OpenAI 系用 `Authorization: Bearer`,两种都认。
+>
 > API Key 默认不校验(任意值可用);若在设置里配置了本地 API Key,则必须携带该值。
 >
 > `GET /v1/models` 返回上游实时模型目录;`GET /health` 返回上游状态(`upstream.state`:ok / login_failed / unreachable / no_account)与 token 有效期,可作为监控探针。
@@ -52,7 +75,7 @@ print(resp.choices[0].message.content)
 ```bash
 npm install
 npm start        # 开发运行
-npm test         # 积分日期/分页/领取/限流回归(无真实上游请求)
+npm test         # 积分/分页/限流回归 + 三套协议映射与流式事件回归(无真实上游请求)
 npm run test:ui  # Electron 界面回归(mock 网关)
 npm run dist -- --publish never  # 本地打包 NSIS 安装包 + 便携版(输出在 dist/)
 ```
