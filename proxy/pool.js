@@ -28,8 +28,8 @@ const LEGACY_DEVICE_FILE = process.env.XHX_DEVICE_FILE || path.join(__dirname, '
 
 const DEFAULT_CONCURRENCY = Number(process.env.XHX_ACCOUNT_CONCURRENCY) || 2; // 每账号在飞请求上限
 const LOW_BALANCE = Number(process.env.XHX_LOW_BALANCE) || 50; // 低于该积分降权
-const COOLDOWN_BASE_MS = Number(process.env.XHX_COOLDOWN_MS) || 20 * 1000; // 撞限速的基础冷却
-const COOLDOWN_MAX_MS = Number(process.env.XHX_COOLDOWN_MAX_MS) || 2 * 60 * 1000; // 指数退避上限
+const COOLDOWN_BASE_MS = Number(process.env.XHX_COOLDOWN_MS) || 900 * 1000; // 撞限速的基础冷却(实测上游冷却 >15 分钟)
+const COOLDOWN_MAX_MS = Number(process.env.XHX_COOLDOWN_MAX_MS) || 1800 * 1000; // 指数退避上限
 const AUTH_POLL_MIN_MS = 1000;
 const AUTH_POLL_MAX_MS = 60 * 1000;
 const QR_APPNAME = process.env.XHX_QR_APPNAME || '商汤小浣熊';
@@ -67,8 +67,8 @@ function tryJson(text) {
 }
 
 /**
- * 判断上游失败类型,供换号/冷却决策
- * @returns {{kind:'rate'|'auth'|'quota'|'unconfirmed'|'transient'|'other'}}
+ * 判断上游失败类型,供换号/降级/冷却决策
+ * @returns {{kind:'rate'|'xext'|'auth'|'quota'|'unconfirmed'|'transient'|'other'}}
  */
 function classifyUpstream(status, text) {
   const raw = String(text || '');
@@ -78,15 +78,29 @@ function classifyUpstream(status, text) {
     .filter(Boolean)
     .join(' ');
 
-  if (status === 429) return { kind: 'rate', message: msg };
+  if (Number(code) === 200901) return { kind: 'unconfirmed', message: msg };
   if (status === 401 || status === 403) return { kind: 'auth', message: msg };
-  if (status === 402) return { kind: 'quota', message: msg };
-  if (code === 200901) return { kind: 'unconfirmed', message: msg };
-  if (/积分|额度|配额|余额|points|quota|insufficient|exceed|超出|用尽|耗尽|不足/i.test(msg)) return { kind: 'quota', message: msg };
-  if (/频繁|过多|限流|限速|too\s*many|rate\s*limit|slow\s*down/i.test(msg)) return { kind: 'rate', message: msg };
+  // v1 通道会注入 x_ext,部分旧实例的 SDK 不认识它: 换实例重试即可,不该计冷却
+  if (/unexpected keyword argument 'x_ext'/.test(raw)) return { kind: 'xext', message: msg };
+  const errorType = String(json?.error?.type || code || '');
+  const quotaMessage = /(?:积分|额度|配额|余额).{0,20}(?:不足|用尽|耗尽)|(?:insufficient|exhausted|depleted).{0,20}(?:points|quota|credits|balance)|(?:points|quota|credits|balance).{0,20}(?:insufficient|exhausted|depleted)/i;
+  if (status === 402 || /insufficient_quota|insufficient_points|quota_exhausted/i.test(errorType) || quotaMessage.test(msg)) return { kind: 'quota', message: msg };
+  if (status === 429 || /频繁|过多|限流|限速|too\s*many|rate[_\s-]*limit|slow\s*down/i.test(msg)) return { kind: 'rate', message: msg };
   if (/登录|认证|授权|会话|unauthorized|forbidden|expired|失效|invalid\s*token/i.test(msg)) return { kind: 'auth', message: msg };
   if (status >= 500) return { kind: 'transient', message: msg };
   return { kind: 'other', message: msg };
+}
+
+// Retry-After 既可能是秒数,也可能是 HTTP 日期;上游要求的等待时间优先。
+function parseRetryAfter(value, now = Date.now()) {
+  const text = String(value ?? '').trim();
+  if (!text) return 0;
+  if (/^\d+(?:\.\d+)?$/.test(text)) {
+    const ms = Number(text) * 1000;
+    return Number.isFinite(ms) ? ms : 0;
+  }
+  const time = Date.parse(text);
+  return Number.isFinite(time) ? Math.max(0, time - now) : 0;
 }
 
 class AccountPool {
@@ -187,6 +201,7 @@ class AccountPool {
         status: 'active', // active | cooldown | exhausted | needs_auth | disabled
         inFlight: 0,
         cooldownUntil: 0,
+        exhaustedUntil: 0,
         consecutiveRateLimit: 0,
         lastError: '',
         lastUsedAt: 0,
@@ -261,8 +276,10 @@ class AccountPool {
         st.cooldownUntil = 0;
       }
       if (st.status === 'exhausted') {
-        if (now < nextLocalMidnight()) continue;
+        if (now < st.exhaustedUntil) continue;
         st.status = 'active';
+        st.exhaustedUntil = 0;
+        st.lastError = '';
       }
       if (!this._tokenUsable(a)) {
         st.status = 'needs_auth';
@@ -302,25 +319,30 @@ class AccountPool {
   // ---- 状态迁移 ----
   markSuccess(account) {
     const st = this._state(account.id);
+    // 并发中的旧请求成功不能覆盖另一请求刚建立的限速/授权/额度状态。
+    if (st.status === 'needs_auth' || st.status === 'exhausted') return;
+    if (st.status === 'cooldown' && st.cooldownUntil > Date.now()) return;
     st.status = 'active';
     st.cooldownUntil = 0;
     st.consecutiveRateLimit = 0;
     st.lastError = '';
   }
 
-  markRateLimited(account, message) {
+  markRateLimited(account, message, retryAfter) {
     const st = this._state(account.id);
     st.consecutiveRateLimit = Math.min(st.consecutiveRateLimit + 1, 5);
-    const wait = Math.min(COOLDOWN_BASE_MS * 2 ** (st.consecutiveRateLimit - 1), COOLDOWN_MAX_MS);
+    const backoff = Math.min(COOLDOWN_BASE_MS * 2 ** (st.consecutiveRateLimit - 1), COOLDOWN_MAX_MS);
+    const wait = Math.max(backoff, parseRetryAfter(retryAfter));
     st.status = 'cooldown';
-    st.cooldownUntil = Date.now() + wait;
-    st.lastError = `限速冷却 ${Math.round(wait / 1000)}s: ${String(message || '').slice(0, 160)}`;
+    st.cooldownUntil = Math.max(st.cooldownUntil, Date.now() + wait);
+    st.lastError = `限速冷却 ${Math.ceil((st.cooldownUntil - Date.now()) / 1000)}s: ${String(message || '').slice(0, 160)}`;
     this.log(`账号 ${account.name} ${st.lastError}`);
   }
 
   markExhausted(account, message) {
     const st = this._state(account.id);
     st.status = 'exhausted';
+    st.exhaustedUntil = nextLocalMidnight();
     st.availablePoints = 0;
     st.lastError = `额度耗尽: ${String(message || '').slice(0, 160)}`;
     this.log(`账号 ${account.name} ${st.lastError},今日停用`);
@@ -338,6 +360,11 @@ class AccountPool {
     if (!data || typeof data !== 'object') return;
     if (Number.isFinite(Number(data.available_points))) st.availablePoints = Number(data.available_points);
     if (Number.isFinite(Number(data.daily_points))) st.dailyPoints = Number(data.daily_points);
+    if (st.status === 'exhausted' && st.availablePoints > 0) {
+      st.status = 'active';
+      st.exhaustedUntil = 0;
+      st.lastError = '';
+    }
     st.balanceAt = Date.now();
   }
 
@@ -584,6 +611,10 @@ class AccountPool {
     const st = this._state(account.id);
     if (!force && st.balanceAt && Date.now() - st.balanceAt < 60 * 1000) return st.availablePoints;
     const resp = await this._upstream('GET', POINTS_PATH, { token: account.token }).catch(() => null);
+    if (resp && [401, 403].includes(resp.status)) {
+      this.markNeedsAuth(account, `balance HTTP ${resp.status}`);
+      return st.availablePoints;
+    }
     if (!resp || resp.status !== 200 || !resp.json || resp.json.code !== 0 || !resp.json.data) return st.availablePoints;
     this.noteBalance(account, resp.json.data);
     if (st.availablePoints === 0 && st.status === 'active') this.markExhausted(account, '额度为 0');
@@ -598,4 +629,4 @@ class AccountPool {
   }
 }
 
-module.exports = { AccountPool, classifyUpstream, jwtExp, jwtPayload, maskPhone, nextLocalMidnight };
+module.exports = { AccountPool, classifyUpstream, parseRetryAfter, jwtExp, jwtPayload, maskPhone, nextLocalMidnight };

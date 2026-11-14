@@ -1,13 +1,15 @@
 {
   "name": "raccoon-proxy-desktop",
   "productName": "RaccoonProxy",
-  "version": "1.10.4",
+  "version": "1.10.5",
   "description": "RaccoonProxy — 本地 OpenAI 兼容 API 网关桌面客户端",
   "main": "electron-main.js",
   "author": "BlackTor-tor",
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "test": "node --test scripts/proxy-test.js",
+    "test:ui": "electron scripts/ui-test.js",
     "icon": "node scripts/gen-icon.js",
     "dist": "electron-builder --win nsis portable"
   },

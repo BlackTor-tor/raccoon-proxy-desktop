@@ -152,8 +152,12 @@ function applyUpstream(h) {
     else if (h.defaultModel && state.models.some((m) => m.id === h.defaultModel)) sel.value = h.defaultModel;
   }
   const el = $('token-expiry'); if (!el) return;
-  const up = h.upstream || {};
-  const map = { ok: ['正常', 'var(--green-ink)'], no_account: ['未配置账号', 'var(--red)'], login_failed: ['登录失败', 'var(--red)'], unreachable: ['上游不可达', 'var(--red)'], error: ['异常', 'var(--red)'], checking: ['检测中…', 'var(--ink-3)'] };
+  const up = { ...h.upstream };
+  if (up.state === 'ok' && h.pool && h.pool.active === 0 && h.pool.cooldown > 0) {
+    up.state = 'rate_limited';
+    up.error = '账号限速冷却中,请稍后重试';
+  }
+  const map = { rate_limited: ['上游限速', 'var(--ink-2)'], ok: ['正常', 'var(--green-ink)'], no_account: ['未配置账号', 'var(--red)'], login_failed: ['登录失败', 'var(--red)'], unreachable: ['上游不可达', 'var(--red)'], error: ['异常', 'var(--red)'], checking: ['检测中…', 'var(--ink-3)'] };
   const [text, color] = map[up.state] || ['未知', 'var(--ink-3)'];
   let full = text;
   if (up.state === 'ok') {
@@ -284,20 +288,33 @@ let checkinBusy = false;
 let pointsFetchedAt = 0;
 const fmtNum = (n) => (Number.isFinite(n) ? Number(n).toLocaleString('zh-CN') : '—');
 
+function finitePoint(n) {
+  if (typeof n !== 'number' && (typeof n !== 'string' || !n.trim())) return null;
+  const value = Number(n);
+  return Number.isFinite(value) ? value : null;
+}
+
 function setCheckinIdle() {
   $('checkin-btn').disabled = false;
   $('checkin-label').textContent = '立即领取';
 }
 function renderPoints(data) {
   const p = data && data.points;
-  if (!p || !Number.isFinite(p.available_points)) return;
-  state.pointsAvailable = p.available_points;
-  $('points-available').textContent = fmtNum(p.available_points);
+  const available = finitePoint(p && p.available_points);
+  if (available === null) { renderPointsUnavailable(); return; }
+  state.pointsAvailable = available;
+  $('points-available').textContent = fmtNum(available);
+  const today = finitePoint(p.today_points);
+  $('points-today').textContent = '今日领取 ' + fmtNum(today);
   const parts = [];
-  if (Number(p.daily_points) > 0) parts.push('今日 ' + fmtNum(p.daily_points));
-  if (Number(p.reward_points) > 0) parts.push('奖励 ' + fmtNum(p.reward_points));
-  if (Number(p.monthly_points) > 0) parts.push('会员 ' + fmtNum(p.monthly_points));
-  if (Number(p.topup_points) > 0) parts.push('充值 ' + fmtNum(p.topup_points));
+  const daily = finitePoint(p.daily_points);
+  if (daily !== null && daily > 0) parts.push('每日余额 ' + fmtNum(daily));
+  const reward = finitePoint(p.reward_points);
+  if (reward !== null && reward > 0) parts.push('奖励余额 ' + fmtNum(reward));
+  const monthly = finitePoint(p.monthly_points);
+  if (monthly !== null && monthly > 0) parts.push('会员余额 ' + fmtNum(monthly));
+  const topup = finitePoint(p.topup_points);
+  if (topup !== null && topup > 0) parts.push('充值余额 ' + fmtNum(topup));
   $('points-breakdown').textContent = parts.length ? parts.join(' · ') : '账户暂无积分明细';
   const ck = data.checkin || {};
   if (ck.date && ck.date === ck.today) {
@@ -311,6 +328,8 @@ function renderPoints(data) {
   }
 }
 function renderPointsUnavailable() {
+  state.pointsAvailable = null;
+  $('points-today').textContent = '今日领取 —';
   $('points-available').textContent = '—';
   $('points-breakdown').textContent = state.running ? '暂时无法获取积分,稍后自动重试' : '开启服务后自动获取';
   setCheckinIdle();
@@ -321,15 +340,30 @@ function pointsHeaders(extra) {
   if (state.settings.apiKey) headers.Authorization = 'Bearer ' + state.settings.apiKey;
   return headers;
 }
+async function readPointsResponse(response) {
+  const data = await response.json().catch(() => null);
+  if (response.ok && data && data.ok === true) return data;
+  const error = new Error('积分请求失败');
+  error.status = response.status;
+  error.type = data && data.error && data.error.type;
+  error.retryAfter = Number(response.headers.get('Retry-After')) || Number(data && data.error && data.error.retry_after) || 0;
+  throw error;
+}
+function pointsErrorText(error, fallback) {
+  if (error.status === 429) return '上游请求频率超限' + (error.retryAfter ? ',请在 ' + Math.ceil(error.retryAfter) + ' 秒后重试' : ',请稍后重试');
+  if (error.type === 'pool_auth_required') return '账号授权已失效,请到设置页重新扫码';
+  return fallback;
+}
 async function refreshPoints(force = false) {
   if (!force && Date.now() - pointsFetchedAt < 60000) return;
   pointsFetchedAt = Date.now();
   try {
     const r = await fetch(`http://127.0.0.1:${state.settings.port}/api/points`, { headers: pointsHeaders() });
-    const data = r.ok ? await r.json() : null;
-    if (data && data.ok) renderPoints(data);
-    else renderPointsUnavailable();
-  } catch { renderPointsUnavailable(); }
+    renderPoints(await readPointsResponse(r));
+  } catch (error) {
+    renderPointsUnavailable();
+    $('points-breakdown').textContent = pointsErrorText(error, $('points-breakdown').textContent);
+  }
 }
 async function checkinNow() {
   if (checkinBusy || !state.running) { if (!state.running) toast('请先开启服务再领取'); return; }
@@ -338,17 +372,18 @@ async function checkinNow() {
   $('checkin-label').textContent = '领取中…';
   try {
     const r = await fetch(`http://127.0.0.1:${state.settings.port}/api/checkin`, { method: 'POST', headers: pointsHeaders({ 'Content-Type': 'application/json' }), body: '{}' });
-    const data = r.ok ? await r.json() : null;
-    if (!data || data.ok !== true) throw new Error();
+    const data = await readPointsResponse(r);
     renderPoints(data);
     if (data.already) toast('今日已领取过,积分都在账户中');
     else if (data.granted) toast('领取成功,积分已到账');
     else toast('领取请求已提交,到账后自动显示');
-    addLog(data.granted ? '每日积分领取成功' + (data.points ? ',今日 ' + fmtNum(data.points.daily_points) : '') : data.already ? '每日积分:今日已领取' : '每日积分:已提交领取,等待到账');
+    const today = finitePoint(data.points && data.points.today_points);
+    addLog(data.granted ? '每日积分领取成功' + (today !== null ? ',今日领取 ' + fmtNum(today) : '') : data.already ? '每日积分:今日已领取' : '每日积分:已提交领取,等待到账');
     if (state.page === 'points') fetchBillsData();
-  } catch {
-    toast('领取失败,请检查服务状态');
-    addLog('每日积分领取失败', 'error');
+  } catch (error) {
+    const message = pointsErrorText(error, '领取失败,请检查服务状态');
+    toast(message);
+    addLog(message, 'error');
     setCheckinIdle();
   } finally { checkinBusy = false; }
 }
@@ -485,17 +520,15 @@ async function fetchBillsData() {
   $('bills-refresh').disabled = true;
   try {
     const r = await fetch(`http://127.0.0.1:${state.settings.port}/api/points/bills?limit=100`, { headers: pointsHeaders() });
-    const data = r.ok ? await r.json() : null;
-    if (!data || data.ok !== true) throw new Error();
+    const data = await readPointsResponse(r);
     billsState.items = Array.isArray(data.items) ? data.items : [];
     billsState.fetchedAt = Date.now();
     renderPoints(data);
     renderBills();
-  } catch {
-    billsState.items = [];
+  } catch (error) {
     renderBills();
     $('bills-empty').hidden = false;
-    $('bills-empty').textContent = state.running ? '暂时无法获取账单,请稍后刷新' : '开启服务后自动获取';
+    $('bills-empty').textContent = pointsErrorText(error, state.running ? '暂时无法获取账单,请稍后刷新' : '开启服务后自动获取');
   } finally {
     billsState.loading = false;
     $('bills-refresh').disabled = false;

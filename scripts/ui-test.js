@@ -2,11 +2,15 @@
 const { app, BrowserWindow } = require('electron');
 const http = require('http');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+app.setPath('userData', fs.mkdtempSync(path.join(os.tmpdir(), 'raccoon-ui-test-')));
 
 // ---- mock 网关:SSE 先发思维链再发答案,记录 reasoning_effort;附带积分/签到路由 ----
 let lastBody = null;
 let checkinDone = false;
-let mockBalance = { available_points: 6798, daily_points: 798, monthly_points: 0, reward_points: 6000, topup_points: 0 };
+let billsRateLimited = false;
+let mockBalance = { available_points: 6798, daily_points: 798, monthly_points: 0, reward_points: 6000, topup_points: 0, today_points: 0 };
 const json = (res, obj) => {
   res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
   res.end(JSON.stringify(obj));
@@ -14,7 +18,7 @@ const json = (res, obj) => {
 const pointsPayload = (extra) => ({
   ok: true,
   points: mockBalance,
-  checkin: { date: checkinDone ? '2026-10-28' : null, today: '2026-10-28', lastResult: checkinDone ? 'granted(manual)' : '' },
+  checkin: { date: checkinDone ? '2026-11-14' : null, today: '2026-11-14', lastResult: checkinDone ? 'granted(manual)' : '' },
   ...extra,
 });
 const upstream = http.createServer((req, res) => {
@@ -28,6 +32,10 @@ const upstream = http.createServer((req, res) => {
   }
   if (req.url === '/api/points') return json(res, pointsPayload());
   if (req.url && req.url.startsWith('/api/points/bills')) {
+    if (billsRateLimited) {
+      res.writeHead(429, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Expose-Headers': 'Retry-After', 'Retry-After': '90' });
+      return res.end(JSON.stringify({ error: { type: 'rate_limit_error', retry_after: 90 } }));
+    }
     return json(res, {
       ...pointsPayload(),
       items: [
@@ -44,7 +52,7 @@ const upstream = http.createServer((req, res) => {
     const granted = !checkinDone;
     if (granted) {
       checkinDone = true;
-      mockBalance = { ...mockBalance, available_points: mockBalance.available_points + 20, reward_points: mockBalance.reward_points + 20 };
+      mockBalance = { ...mockBalance, available_points: mockBalance.available_points + 300, daily_points: mockBalance.daily_points + 300, today_points: 300 };
     }
     req.resume();
     return json(res, pointsPayload({ granted, popup: granted ? { points: 20, source: 'daily' } : null }));
@@ -154,19 +162,31 @@ app.whenReady().then(async () => {
       pageVisible: getComputedStyle(document.getElementById('page-points')).display !== 'none',
       available: document.getElementById('points-available').textContent,
       breakdown: document.getElementById('points-breakdown').textContent,
+      today: document.getElementById('points-today').textContent,
       rows,
       btnDisabled: document.getElementById('checkin-btn').disabled,
       label: document.getElementById('checkin-label').textContent,
       loadMoreAbsent: document.getElementById('bills-more') === null,
     };
   })()`);
-  assert('积分管理页可进入并显示总积分', pointsBefore.pageVisible === true && pointsBefore.available === '6,798' && pointsBefore.breakdown.includes('今日 798') && pointsBefore.breakdown.includes('奖励 6,000'), pointsBefore);
+  assert('积分管理页区分历史余额与今日领取', pointsBefore.pageVisible === true && pointsBefore.available === '6,798' && pointsBefore.breakdown.includes('每日余额 798') && pointsBefore.breakdown.includes('奖励余额 6,000') && pointsBefore.today === '今日领取 0', pointsBefore);
   assert('明细只保留最近 100 条(无加载更多)', pointsBefore.loadMoreAbsent === true && pointsBefore.rows.length === 4, { absent: pointsBefore.loadMoreAbsent, rows: pointsBefore.rows.length });
   assert('明细含 token 读取/写入/缓存与变动列', pointsBefore.rows.length === 4 && pointsBefore.rows[0].length === 6 && pointsBefore.rows[0][2] === '12' && pointsBefore.rows[0][3] === '4' && pointsBefore.rows[0][4] === '0' && pointsBefore.rows[0][5] === '-2', pointsBefore.rows);
   assert('官方账单行无 token 时显示占位', pointsBefore.rows[1][2] === '—' && pointsBefore.rows[1][3] === '—' && pointsBefore.rows[1][5] === '+798', pointsBefore.rows[1]);
   assert('限免模型变动显示「免费」', pointsBefore.rows[2][2] === '1,200' && pointsBefore.rows[2][5] === '免费', pointsBefore.rows[2]);
   assert('未入账请求变动显示占位', pointsBefore.rows[3][2] === '30' && pointsBefore.rows[3][5] === '—', pointsBefore.rows[3]);
   assert('未签到时签到按钮可用', pointsBefore.btnDisabled === false && pointsBefore.label === '立即领取', pointsBefore);
+
+  const unknownPoints = await run(`(() => {
+    renderPoints({ points: { available_points: '6798', daily_points: '798', reward_points: '6000', today_points: null } });
+    const result = { available: document.getElementById('points-available').textContent, today: document.getElementById('points-today').textContent };
+    renderPoints({ points: null });
+    result.missingBalance = document.getElementById('points-available').textContent;
+    result.missingToday = document.getElementById('points-today').textContent;
+    return result;
+  })()`);
+  assert('数字字符串余额可显示,未知当日统计保持占位', unknownPoints.available === '6,798' && unknownPoints.today === '今日领取 —', unknownPoints);
+  assert('缺失余额不误显示0且清除旧值', unknownPoints.missingBalance === '—' && unknownPoints.missingToday === '今日领取 —', unknownPoints);
 
   const afterCheckin = await run(`(async () => {
     document.getElementById('checkin-btn').click();
@@ -175,12 +195,27 @@ app.whenReady().then(async () => {
       available: document.getElementById('points-available').textContent,
       label: document.getElementById('checkin-label').textContent,
       disabled: document.getElementById('checkin-btn').disabled,
+      today: document.getElementById('points-today').textContent,
       toastVisible: document.getElementById('toast').classList.contains('visible'),
       toastText: document.getElementById('toast-text').textContent,
     };
   })()`);
-  assert('手动签到后余额刷新且按钮置为已签到', afterCheckin.available === '6,818' && afterCheckin.disabled === true && afterCheckin.label === '今日已领取', afterCheckin);
+  assert('手动领取后今日统计为300且累计余额独立更新', afterCheckin.available === '7,098' && afterCheckin.today === '今日领取 300' && afterCheckin.disabled === true && afterCheckin.label === '今日已领取', afterCheckin);
   assert('签到成功有 toast 提示', afterCheckin.toastVisible === true && afterCheckin.toastText.includes('领取成功'), afterCheckin);
+
+  billsRateLimited = true;
+  const limitedBills = await run(`(async () => {
+    await fetchBillsData();
+    applyUpstream({ upstream: { state: 'ok' }, pool: { active: 0, cooldown: 1 } });
+    return {
+      rows: document.querySelectorAll('#bills-list tr').length,
+      hint: document.getElementById('bills-empty').textContent,
+      upstream: document.getElementById('token-expiry').textContent,
+    };
+  })()`);
+  assert('账单限速保留已有明细并提示退避时间', limitedBills.rows === 4 && limitedBills.hint.includes('90 秒'), limitedBills);
+  assert('目录正常但账号冷却时仪表盘显示上游限速', limitedBills.upstream.includes('上游限速'), limitedBills);
+  billsRateLimited = false;
 
   // 0.8) 更新提醒弹窗:显示版本号,勾选「不再提醒」后关闭
   const modal = await run(`(async () => {

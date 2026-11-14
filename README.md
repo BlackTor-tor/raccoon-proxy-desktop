@@ -16,7 +16,7 @@
 - **实时日志**:请求状态、耗时、上游错误实时可见
   - **Playground**:内置对话测试,流式输出,装完即可自检;**思考程度**可选(默认/关闭/低/中/高),模型的思考过程实时折叠展示;回答流式逐字渲染,等待/思考/生成全程有实时状态提示;**历史对话**子菜单自动保存最近 50 段对话(本地存储),可一键恢复、删除(支持撤销)
 - **本地鉴权(可选)**:给本地端口加一道 Bearer API Key
-- **每日积分自动领取**:服务在线时每天自动以网页会话身份完成登录、绑定可信设备、心跳,并刷新官方账户设置(`setting_info`)触发放发(约 +300/天),未到账自动重试;**积分管理页**展示总积分与最近 100 条官方账单明细,每笔对话记录 token 读取/写入/缓存与对应扣减;接口 `GET /api/points`、`GET /api/points/bills`、`POST /api/checkin`
+- **每日积分自动领取**:服务在线时每天自动以网页会话身份绑定可信设备、心跳,并刷新官方账户设置(`setting_info`)触发发放,未到账自动重试;**积分管理页**分别展示可用总余额、当天实际领取的每日积分、各类剩余余额和最近 100 条官方账单。`today_points` 按本地日期分页汇总正向每日发放流水,`daily_points` 是每日积分剩余余额;当日流水无法完整查询时显示「—」。每笔对话记录 token 读取/写入/缓存与对应扣减;接口 `GET /api/points`、`GET /api/points/bills`、`POST /api/checkin`
 - **软件更新**:设置页一键检查并下载最新版(网络不佳自动重试 3 轮,仍失败可一键跳转 Releases 手动下载);**下载加速**——并行测速自动选择 GitHub 直连或国内镜像(gh-proxy.com / ghfast.top)的最快线路,下载后用 GitHub 官方 SHA-256 摘要校验完整性,镜像内容不一致时自动删除并重试;**按客户端形态下载对应产物**——安装版下载 Setup 安装包,便携版下载便携版 exe 到同目录(退出后运行新文件完成升级);启动后自动检查新版本,发现更新弹窗提醒是否更新,可勾选「不再提醒这个版本」(仅对该版本静默,手动检查不受影响)
 
 ## 快速开始
@@ -52,16 +52,20 @@ print(resp.choices[0].message.content)
 ```bash
 npm install
 npm start        # 开发运行
-npm run dist     # 打包 NSIS 安装包 + 便携版(输出在 dist/)
+npm test         # 积分日期/分页/领取/限流回归(无真实上游请求)
+npm run test:ui  # Electron 界面回归(mock 网关)
+npm run dist -- --publish never  # 本地打包 NSIS 安装包 + 便携版(输出在 dist/)
 ```
 
 也可以脱离 Electron 单独跑网关进程:
 
 ```bash
-XHX_PHONE=... XHX_PASSWORD=... node proxy/server.js   # 默认 http://127.0.0.1:8317
+node proxy/server.js   # 默认 http://127.0.0.1:8317,打开 /auth/add 扫码授权
 ```
 
-环境变量:`PORT` / `HOST` / `XHX_PHONE` / `XHX_PASSWORD` / `XHX_NATION_CODE` / `PROXY_API_KEY` / `XHX_TOKEN_FILE` / `XHX_CHECKIN_FILE`(领取状态)/ `XHX_DEVICE_FILE`(可信设备身份)/ `XHX_CLIENT_PLATFORM` / `XHX_CLIENT_VERSION`(上报的设备平台与客户端版本,默认 `desktop-windows` / `1.1.5`)。
+环境变量:`PORT` / `HOST` / `PROXY_API_KEY` / `XHX_ACCOUNTS_FILE`(扫码账号池)/ `XHX_TOKEN_FILE`(旧凭证迁移)/ `XHX_CHECKIN_FILE`(领取状态)/ `XHX_USAGE_FILE`(本地用量)/ `XHX_DEVICE_FILE`(可信设备身份)/ `XHX_CLIENT_PLATFORM` / `XHX_CLIENT_VERSION`(上报的设备平台与客户端版本,默认 `desktop-windows` / `1.1.5`)。
+
+上游限流时尊重 `Retry-After`(秒数或HTTP日期),未提供时按本地20秒起指数退避;目录探测成功不会清除对话冷却。积分/账单查询共享30秒缓存与并发请求,429期间阻止重复刷新上游;遇到余额不足时按额度错误处理。仪表盘会显示账号限速状态。上游未公布的限额和恢复时间需要以实际响应为准。
 
 ## 目录结构
 

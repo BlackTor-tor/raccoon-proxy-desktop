@@ -15,12 +15,26 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
-const { AccountPool, classifyUpstream, jwtExp } = require('./pool');
+const { AccountPool, classifyUpstream, parseRetryAfter, jwtExp } = require('./pool');
 const qrCodec = require('./qr');
 
 const UPSTREAM_HOST = 'xiaohuanxiong.com';
 const CONFIRM_URL_PATH = '/api/web/auth/v1/iam/confirm';
-const CHAT_URL_PATH = '/api/web/llm/v2/chat/completions';
+/**
+ * 模型对话通道。两条通道是不同后端、不同限流桶:
+ *  - v2 按「用户」维度限流(user_model_rate_limited),窗口 6 发 + 冷却 >15 分钟
+ *  - v1 独立桶,但服务端会注入 x_ext,部分旧实例报 500,换实例重试即可通过
+ * 撞 v2 限流时先在同号内降级到 v1,再考虑换号。
+ *
+ * 实测: v1 只有默认模型 raccoon-090dd3 能通(约 47%),其余模型在 v1 上稳定 500,
+ * 所以 v1 通道只对 V1_MODELS 里的模型开放。
+ */
+const CHAT_CHANNELS = [
+  { id: 'v2', path: '/api/web/llm/v2/chat/completions', platform: 'web', version: '156.0.0.0' },
+  { id: 'v1', path: '/api/web/llm/v1/chat/completions', platform: 'desktop-windows', version: '1.1.5' },
+];
+const V1_MODELS = new Set(['raccoon-090dd3']);
+const DEFAULT_MODEL = 'raccoon-090dd3'; // 降级改写的目标模型,也是 v1 唯一能通的模型
 const CATALOG_URL_PATH = '/api/web/llm/v2/model_catalog';
 const CATALOG_TTL_MS = 10 * 60 * 1000;
 const UPSTREAM_CHECK_INTERVAL_MS = 5 * 60 * 1000;
@@ -46,7 +60,9 @@ const PORT = Number(process.env.PORT || 8317);
 const HOST = process.env.HOST || '127.0.0.1';
 const PROXY_API_KEY = process.env.PROXY_API_KEY || '';
 const MAX_CHAT_ATTEMPTS = Math.max(2, Number(process.env.XHX_MAX_ATTEMPTS) || 4); // 一次请求最多换几个号
+const MAX_XEXT_RETRIES = Math.max(1, Number(process.env.XHX_XEXT_RETRIES) || 12); // v1 通道 x_ext 500 的原地重试上限
 const COOLDOWN_WAIT_MS = Number(process.env.XHX_COOLDOWN_WAIT_MS) || 25 * 1000; // 全池冷却时最多等多久再重试
+const SLOT_WAIT_MS = Number(process.env.XHX_SLOT_WAIT_MS) || 60 * 1000; // 并发槽位满时最多排队等多久
 
 function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
@@ -197,16 +213,104 @@ async function sendHeartbeat(account) {
   return res.statusCode;
 }
 
-// 以账单为准判断今天是否已发放每日积分
-async function hasDailyGrantToday(account) {
+// 「今日领取」来自当天的正向发放账单,daily_points 仅代表每日积分剩余余额。
+const todayGrantCache = new Map();
+const todayGrantInFlight = new Map();
+
+function billDateStr(value) {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '' : localDateStr(d);
+}
+
+function isDailyGrantBill(bill) {
+  return bill.points > 0 && (bill.bizType === 'daily_grant' || (!bill.bizType && /每日积分发放|daily[ _-]?grant/i.test(bill.event)));
+}
+
+async function fetchTodayDailyGrant(account, firstPage = null, force = false) {
   const today = localDateStr();
-  const { items } = await fetchBills(account, 30);
-  return items.some((b) => String(b.at).startsWith(today) && /每日积分发放/.test(b.event));
+  const cached = todayGrantCache.get(account.id);
+  if (!force && cached && cached.token === account.token && cached.date === today && Date.now() - cached.at < 30000) return cached.data;
+  const active = todayGrantInFlight.get(account.id);
+  if (active && active.token === account.token && active.date === today) {
+    if (!force) return active.promise;
+    await active.promise.catch(() => {});
+  }
+  const task = { token: account.token, date: today };
+  task.promise = (async () => {
+    let page = firstPage || await fetchBills(account, 100, null, force);
+    let points = 0;
+    let found = false;
+    const seenIds = new Set();
+    const seenCursors = new Set();
+    for (let i = 0; ; i++) {
+      let hasOlder = false;
+      for (const bill of page.items) {
+        const date = billDateStr(bill.at);
+        if (date && date < today) hasOlder = true;
+        if (date !== today || !isDailyGrantBill(bill) || (bill.id && seenIds.has(bill.id))) continue;
+        if (bill.id) seenIds.add(bill.id);
+        points += bill.points;
+        found = true;
+      }
+      if (hasOlder || !page.hasMore) break;
+      if (!page.items.length || !page.nextCursor || seenCursors.has(page.nextCursor) || i >= 19) throw new Error('当日账单分页不完整,稍后重试');
+      seenCursors.add(page.nextCursor);
+      page = await fetchBills(account, 100, page.nextCursor, force);
+    }
+    if (today !== localDateStr()) throw new Error('统计期间日期已变化,请刷新');
+    const data = { points, found };
+    if (task.token === account.token) todayGrantCache.set(account.id, { at: Date.now(), token: task.token, date: today, data });
+    return data;
+  })();
+  todayGrantInFlight.set(account.id, task);
+  try {
+    return await task.promise;
+  } finally {
+    if (todayGrantInFlight.get(account.id) === task) todayGrantInFlight.delete(account.id);
+  }
+}
+
+async function hasDailyGrantToday(account) {
+  return (await fetchTodayDailyGrant(account, null, true)).found;
+}
+
+async function pointsWithTodayGrant(account, force = false, firstBills = null) {
+  const points = await fetchPoints(account, force);
+  const today = await fetchTodayDailyGrant(account, firstBills, force).catch((e) => {
+    log(`[${account.name}] 当日积分流水获取失败: ${String(e?.message || e)}`);
+    return null;
+  });
+  if (today) {
+    const st = checkinOf(account);
+    if (today.found && st.date !== localDateStr()) {
+      st.date = localDateStr();
+      st.lastResult = 'daily-granted(bills)';
+      saveCheckinState();
+    } else if (!today.found && st.date === localDateStr()) {
+      st.date = null;
+      st.lastResult = '';
+      saveCheckinState();
+    }
+  }
+  return { ...points, today_points: today ? today.points : null };
 }
 
 // 每日领取:复用账号自身 token → 绑定 web 可信设备 → 心跳 → setting_info 触发放发 → 账单确认
 // (token 由扫码授权获得,30 天有效;过期后重新扫码,不依赖密码)
-async function doCheckin(account) {
+const checkinInFlight = new Map();
+async function doCheckin(account, reason) {
+  if (checkinInFlight.has(account.id)) return checkinInFlight.get(account.id);
+  const task = performCheckin(account, reason);
+  checkinInFlight.set(account.id, task);
+  try {
+    return await task;
+  } finally {
+    checkinInFlight.delete(account.id);
+  }
+}
+
+async function performCheckin(account, reason) {
+  if (await hasDailyGrantToday(account)) return { confirmed: true };
   const token = account.token;
   const deviceId = account.deviceId;
   await bindWebDevice(account, token, deviceId).catch((e) => log(`[${account.name}] 网页可信设备绑定失败: ${String(e?.message || e)}`));
@@ -217,46 +321,86 @@ async function doCheckin(account) {
   for (let i = 0; i < 4 && !confirmed; i++) {
     if (i) await new Promise((r) => setTimeout(r, 1500));
     if (pool.statusOf(account) === 'needs_auth') break; // token 已失效,不再重试轰炸
-    confirmed = await hasDailyGrantToday(account).catch(() => false);
+    confirmed = await hasDailyGrantToday(account);
   }
   return { confirmed };
 }
 
-// 带 token 且 401/403 时把账号标记为待授权(或密码重登)的 JSON 请求
-async function authedJson(account, method, urlPath, { headers = {}, timeoutMs = 20000 } = {}) {
-  const res = await request(method, urlPath, { body: method === 'POST' ? '{}' : undefined, token: account.token, headers, timeoutMs });
-  const text = await readJsonBody(res);
-  if ([401, 403].includes(res.statusCode)) {
-    pool.markNeedsAuth(account, `HTTP ${res.statusCode} ${text.slice(0, 120)}`);
-    throw new Error(`${urlPath} HTTP ${res.statusCode}: 需重新扫码授权`);
+// 积分/账单的限速独立退避;重复刷新共享GET请求,不会绕过上游Retry-After。
+const jsonReadCache = new Map();
+const jsonInFlight = new Map();
+const jsonBackoff = new Map();
+async function authedJson(account, method, urlPath, { headers = {}, body, timeoutMs = 20000, force = false } = {}) {
+  const key = `${account.id}:${account.token}:${method}:${urlPath}`;
+  const rateKey = `${account.id}:${account.token}:${urlPath.split('?')[0]}`;
+  const blocked = jsonBackoff.get(rateKey);
+  if (blocked && blocked.until > Date.now()) {
+    const error = new Error(`${urlPath}: 上游请求频率超限,请稍后重试`);
+    Object.assign(error, { statusCode: 429, type: 'rate_limit_error', retryAfter: Math.max(1, Math.ceil((blocked.until - Date.now()) / 1000)) });
+    throw error;
   }
-  if (res.statusCode !== 200) throw new Error(`${urlPath} HTTP ${res.statusCode}: ${text.slice(0, 200)}`);
-  return JSON.parse(text);
+  if (blocked) jsonBackoff.delete(rateKey);
+  const cached = jsonReadCache.get(key);
+  if (method === 'GET' && !force && cached && Date.now() - cached.at < 30000) return cached.data;
+  if (!force && jsonInFlight.has(key)) return jsonInFlight.get(key);
+  const task = (async () => {
+    const res = await request(method, urlPath, { body: body === undefined && method === 'POST' ? '{}' : body, token: account.token, headers, timeoutMs });
+    const text = await readJsonBody(res);
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    const businessError = json && (json.error || (json.code !== undefined && Number(json.code) !== 0));
+    if (res.statusCode !== 200 || businessError) {
+      const cls = classifyUpstream(res.statusCode, text);
+      const error = new Error(`${urlPath} HTTP ${res.statusCode}: ${String(cls.message || text).slice(0, 200)}`);
+      error.statusCode = 502;
+      if (cls.kind === 'auth') {
+        pool.markNeedsAuth(account, `HTTP ${res.statusCode} ${text.slice(0, 120)}`);
+        error.type = 'pool_auth_required';
+      } else if (cls.kind === 'rate') {
+        const wait = Math.max(1000, parseRetryAfter(res.headers['retry-after']) || 20000);
+        jsonBackoff.set(rateKey, { until: Date.now() + wait });
+        Object.assign(error, { statusCode: 429, type: 'rate_limit_error', retryAfter: Math.ceil(wait / 1000) });
+      }
+      throw error;
+    }
+    if (!json || typeof json !== 'object') throw new Error(`${urlPath}: 上游未返回有效JSON`);
+    if (method === 'GET') {
+      if (jsonReadCache.size >= 200) jsonReadCache.delete(jsonReadCache.keys().next().value);
+      jsonReadCache.set(key, { at: Date.now(), data: json });
+    }
+    return json;
+  })();
+  jsonInFlight.set(key, task);
+  try {
+    return await task;
+  } finally {
+    if (jsonInFlight.get(key) === task) jsonInFlight.delete(key);
+  }
 }
 
 const pointsCache = new Map(); // accountId -> { at, data }
 
 async function fetchPoints(account, force = false) {
   const cached = pointsCache.get(account.id);
-  if (!force && cached && cached.data && Date.now() - cached.at < 30000) return cached.data;
-  const json = await authedJson(account, 'GET', POINTS_URL_PATH);
+  if (!force && cached && cached.token === account.token && cached.data && Date.now() - cached.at < 30000) return cached.data;
+  const json = await authedJson(account, 'GET', POINTS_URL_PATH, { force });
   if (json?.code !== 0 || !json.data) throw new Error(`points balance: unexpected response ${JSON.stringify(json).slice(0, 120)}`);
-  pointsCache.set(account.id, { at: Date.now(), data: json.data });
+  pointsCache.set(account.id, { at: Date.now(), token: account.token, data: json.data });
   pool.noteBalance(account, json.data);
   return json.data;
 }
 
 // 官方积分账单(消耗/发放流水):GET /api/web/points/v2/bills,游标分页
-async function fetchBills(account, limit = 50, cursor = null) {
+async function fetchBills(account, limit = 50, cursor = null, force = false) {
   const qs = new URLSearchParams({ 'paging.limit': String(limit), type: 'all' });
   if (cursor) qs.set('cursor', cursor);
-  const json = await authedJson(account, 'GET', `${BILLS_URL_PATH}?${qs.toString()}`);
+  const json = await authedJson(account, 'GET', `${BILLS_URL_PATH}?${qs.toString()}`, { force });
   if (json?.code !== 0) throw new Error(`points bills: code=${json?.code} ${json?.message || ''}`);
   const data = json.data || {};
-  const items = Array.isArray(data.items) ? data.items : [];
+  if (!Array.isArray(data.items)) throw new Error('points bills: 上游缺少账单列表');
   const nextCursor = data.next_cursor ?? data.cursor ?? data.paging?.next_cursor ?? data.paging?.cursor ?? null;
-  const hasMore = Boolean((data.has_more ?? data.paging?.has_more ?? Boolean(nextCursor)) && nextCursor);
-  return { items: items.map(mapBill), nextCursor, hasMore };
+  const hasMore = Boolean(data.has_more ?? data.paging?.has_more ?? Boolean(nextCursor));
+  return { items: data.items.map(mapBill), nextCursor, hasMore };
 }
 
 function mapBill(item) {
@@ -431,7 +575,7 @@ async function autoCheckin(account, reason) {
       saveCheckinState();
       pointsCache.delete(account.id);
       const b = await fetchPoints(account, true).catch(() => null);
-      log(`[${account.name}] 每日积分已自动领取${b ? `:今日 ${b.daily_points}` : ''}`);
+      log(`[${account.name}] 每日积分已自动领取${b ? `:可用 ${b.available_points}` : ''}`);
     } else {
       st.lastResult = 'pending';
       saveCheckinState();
@@ -440,7 +584,7 @@ async function autoCheckin(account, reason) {
   } catch (e) {
     st.lastResult = `failed: ${String(e?.message || e).slice(0, 160)}`;
     saveCheckinState();
-    console.error(`[${new Date().toISOString()}] [${account.name}] 每日积分自动领取失败(${CHECKIN_INTERVAL_MS / 60000} 分钟后重试): ${e.message}`);
+    console.error(`[${new Date().toISOString()}] [raccoon-proxy] [${account.name}] 每日积分自动领取失败(${CHECKIN_INTERVAL_MS / 60000} 分钟后重试): ${e.message}`);
   }
 }
 
@@ -488,7 +632,6 @@ async function fetchCatalog(force = false) {
   }
   if (!models.length) throw new Error('empty catalog');
   catalogCache = { at: Date.now(), models, defaultModel };
-  pool.markSuccess(account);
   return catalogCache;
 }
 
@@ -547,12 +690,40 @@ function modelListForApi() {
   return FALLBACK_MODELS.map((m) => ({ id: m.id, object: 'model', created: 1700000000, owned_by: 'raccoon-proxy', note: m.note, fallback: true }));
 }
 
-function sendJson(res, status, obj) {
+/**
+ * 把非流式 chat.completion 整包拆成 SSE 帧, 供客户端要流式但只能走 v1 的场景回放。
+ * 文本按 12 字一组切块, 最后补 finish_reason 与 [DONE]。
+ */
+function replayAsSse(text, model) {
+  let json;
+  try { json = JSON.parse(text); } catch { return null; }
+  const msg = json?.choices?.[0]?.message || {};
+  const content = typeof msg.content === 'string' ? msg.content : '';
+  const reasoning = typeof msg.reasoning_content === 'string' ? msg.reasoning_content : '';
+  const id = json.id || `chatcmpl-${Date.now().toString(36)}`;
+  const created = json.created || Math.floor(Date.now() / 1000);
+  const frame = (delta, finish) =>
+    `data: ${JSON.stringify({
+      id, object: 'chat.completion.chunk', created, model,
+      choices: [{ index: 0, delta, finish_reason: finish || null }],
+    })}\n\n`;
+  const out = [frame({ role: 'assistant', content: '' })];
+  for (const [key, src] of [['reasoning_content', reasoning], ['content', content]]) {
+    if (!src) continue;
+    for (let i = 0; i < src.length; i += 12) out.push(frame({ [key]: src.slice(i, i + 12) }));
+  }
+  out.push(frame({}, json?.choices?.[0]?.finish_reason || 'stop'));
+  out.push('data: [DONE]\n\n');
+  return out.join('');
+}
+
+function sendJson(res, status, obj, headers = {}) {
   const body = JSON.stringify(obj);
   res.writeHead(status, {
     'Content-Type': 'application/json; charset=utf-8',
     'Content-Length': Buffer.byteLength(body),
     'Access-Control-Allow-Origin': '*',
+    ...headers,
   });
   res.end(body);
 }
@@ -595,6 +766,46 @@ function readRequestBody(req, limit = 20 * 1024 * 1024) {
  * 对话转发:最少并发选号 → 撞限速/额度耗尽/授权失效换号 → 成功即流式输出
  * 换号发生在响应头之前,客户端无感知
  */
+/**
+ * 发一次上游对话请求并分类。
+ * 成功(含流式)返回未消费的 upstream;失败返回已读干净的正文与分类结果。
+ */
+async function chatOnce(account, channel, jsonBody) {
+  const upstream = await request('POST', channel.path, {
+    body: jsonBody,
+    token: account.token,
+    // 上游对复用 keep-alive 连接的流式响应不计费(实测),强制新连接确保每笔对话都入账
+    headers: {
+      Connection: 'close',
+      'X-Client-Platform': channel.platform,
+      'X-Client-Version': channel.version,
+      'X-Client-Device-ID': account.deviceId,
+    },
+  });
+
+  const status = upstream.statusCode || 502;
+  const ct = String(upstream.headers['content-type'] || '');
+  const isEventStream = /event-stream/i.test(ct);
+
+  // 失败响应 / 非流式响应:先读完整 body 再决策
+  if (status >= 300 || !isEventStream) {
+    const text = await readJsonBody(upstream);
+    let json = null;
+    try { json = JSON.parse(text); } catch {}
+    const businessError = json && (json.error || (json.code !== undefined && Number(json.code) !== 0));
+    if (status >= 200 && status < 300 && !businessError) return { ok: true, upstream, status, ct, text };
+    return { ok: false, status, ct, text, cls: classifyUpstream(status, text) };
+  }
+
+  // 流式: 先暂停,避免 await 期间数据流走丢失
+  upstream.pause();
+  return { ok: true, upstream, status, ct, stream: true };
+}
+
+/**
+ * 对话转发:最少并发选号 → 通道内失败处理 → 撞限速降级/换号 → 成功即流式输出
+ * 换号与降级都发生在响应头之前,客户端无感知
+ */
 async function proxyChat(req, res) {
   let body;
   try {
@@ -612,27 +823,35 @@ async function proxyChat(req, res) {
   if (!Array.isArray(payload.messages)) {
     return sendJson(res, 400, { error: { message: 'messages must be an array', type: 'invalid_request_error' } });
   }
-  if (typeof payload.model !== 'string' || !payload.model) payload.model = catalogCache.defaultModel || 'SenseChat-5';
+  if (typeof payload.model !== 'string' || !payload.model) payload.model = catalogCache.defaultModel || DEFAULT_MODEL;
 
   const isStream = payload.stream === true;
   const jsonBody = JSON.stringify(payload);
+  // 降级到 v1 的请求体: 模型换成默认模型(v1 只认它), 且必须 stream:false
+  // 实测 v1 对 stream:true 稳定 500(0/10), 非流式则约五成可通;
+  // 客户端要流式时由本代理把整包 JSON 拆成 SSE 帧回放
+  const wantStream = payload.stream === true;
+  const fallbackBody = JSON.stringify({ ...payload, model: DEFAULT_MODEL, stream: false });
+  const canFallback = payload.model !== DEFAULT_MODEL;
 
   const tried = new Set();
   let lastFailure = null;
   let badGatewayRetries = 0;
   let attempts = 0;
-  let waitedForCooldown = false;
+  let waitedForSlot = false;
 
   while (attempts < MAX_CHAT_ATTEMPTS) {
     const account = pool.pick(tried);
     if (!account) {
-      // 全池暂时不可用:若最近的可恢复时间不长(如撞限速冷却),先等一会儿再试,避免直接失败整轮对话
+      // 全池暂时不可用:并发槽位满(等待很短)或限速冷却(等待较长)都先等一会儿再试,
+      // 避免并发一上来就直接 503。冷却等待只给一次,槽位等待给到 SLOT_WAIT_MS。
       const waitMs = pool.nextReadyIn();
-      if (!waitedForCooldown && waitMs != null && waitMs <= COOLDOWN_WAIT_MS) {
-        waitedForCooldown = true;
+      const limitMs = pool.summary().active > 0 ? SLOT_WAIT_MS : COOLDOWN_WAIT_MS;
+      if (waitMs != null && waitMs <= limitMs && !(waitedForSlot && pool.summary().active === 0)) {
+        waitedForSlot = true;
         tried.clear();
         log(`账号池暂不可用,${Math.max(1, Math.ceil(waitMs / 1000))}s 后重试`);
-        await new Promise((r) => setTimeout(r, Math.max(300, waitMs + 150)));
+        await new Promise((r) => setTimeout(r, Math.max(120, waitMs + 80)));
         continue;
       }
       break;
@@ -648,121 +867,145 @@ async function proxyChat(req, res) {
       pool.release(account);
     };
 
-    const started = Date.now();
-    let upstream;
-    try {
-      upstream = await request('POST', CHAT_URL_PATH, {
-        body: jsonBody,
-        token: account.token,
-        // 上游对复用 keep-alive 连接的流式响应不计费(实测),强制新连接确保每笔对话都入账
-        headers: { Connection: 'close' },
-      });
-    } catch (e) {
-      release();
-      lastFailure = { kind: 'network', message: String(e?.message || e) };
-      log(`[${account.name}] 上游网络错误: ${lastFailure.message}`);
-      continue;
-    }
+    // 本号内逐通道尝试: v2 撞限流不冷却账号,降级 v1;v1 也撞才冷却换号
+    // v1 只认默认模型,所以非默认模型降级时把 model 改写成默认模型(auto 路由)
+    const channels = V1_MODELS.has(payload.model) ? [...CHAT_CHANNELS] : [CHAT_CHANNELS[0], CHAT_CHANNELS[1]];
+    let nextAccount = false;
+    for (const channel of channels) {
+      // v1 通道一律用默认模型,其余通道用原模型
+      const body = channel.id === 'v1' ? fallbackBody : jsonBody;
+      let xextRetries = 0;
+      while (!nextAccount) {
+        const started = Date.now();
+        let r;
+        try {
+          r = await chatOnce(account, channel, body);
+        } catch (e) {
+          lastFailure = { kind: 'network', message: String(e?.message || e) };
+          log(`[${account.name}] ${channel.id} 上游网络错误: ${lastFailure.message}`);
+          nextAccount = true;
+          break;
+        }
 
-    const status = upstream.statusCode || 502;
-    const ct = String(upstream.headers['content-type'] || '');
-    const isEventStream = /event-stream/i.test(ct);
-    log(`[${account.name}] upstream ${status} (stream=${isStream}, model=${payload.model})`);
+        log(`[${account.name}] ${channel.id} upstream ${r.status} (stream=${isStream}, model=${channel.id === 'v1' ? DEFAULT_MODEL : payload.model})`);
 
-    // 失败响应 / 非流式响应:先读完整 body 再决策
-    if (status >= 300 || !isEventStream) {
-      let text = '';
-      try {
-        text = await readJsonBody(upstream);
-      } catch (e) {
+        if (r.ok) {
+          log(`[${account.name}] ${channel.id} upstream ${r.status} ok in ${Date.now() - started}ms`);
+          // 降级改写过模型时,用响应头告知客户端实际模型
+          const modelHeader = channel.id === 'v1' && canFallback ? { 'X-Raccoon-Model-Fallback': DEFAULT_MODEL } : {};
+          const usedModel = channel.id === 'v1' && canFallback ? DEFAULT_MODEL : payload.model;
+          if (!r.stream) {
+            // 成功(非流式):记录 usage 后返回;客户端原本要流式则把整包拆成 SSE 回放
+            pool.markSuccess(account);
+            const usage = extractUsage(r.ct, r.text);
+            if (usage) recordUsage({ account, model: usedModel, usage });
+            release();
+            if (wantStream) {
+              const sse = replayAsSse(r.text, payload.model);
+              if (sse) {
+                log(`[${account.name}] ${channel.id} 非流式结果已回放为 SSE`);
+                res.writeHead(200, {
+                  'Cache-Control': 'no-store',
+                  'Access-Control-Allow-Origin': '*',
+                  'Content-Type': 'text/event-stream; charset=utf-8',
+                  'X-Raccoon-Sse-Replay': '1',
+                  ...modelHeader,
+                });
+                res.end(sse);
+                return;
+              }
+            }
+            res.writeHead(r.status, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'Content-Type': r.ct || 'application/json; charset=utf-8', ...modelHeader });
+            res.end(r.text);
+            return;
+          }
+          // 流式成功:边转发边留存,结束后记录 usage
+          pool.markSuccess(account);
+          res.writeHead(r.status, {
+            'Cache-Control': 'no-store',
+            'Access-Control-Allow-Origin': '*',
+            ...(r.ct ? { 'Content-Type': r.ct } : {}),
+            ...modelHeader,
+          });
+          const captured = [];
+          let capturedSize = 0;
+          r.upstream.on('data', (chunk) => {
+            if (capturedSize < USAGE_CAPTURE_LIMIT) {
+              captured.push(chunk);
+              capturedSize += chunk.length;
+            }
+          });
+          r.upstream.on('end', () => {
+            const usage = extractUsage(r.ct, Buffer.concat(captured).toString('utf8'));
+            if (usage) recordUsage({ account, model: usedModel, usage });
+            release();
+          });
+          r.upstream.on('error', () => {
+            release();
+            res.destroy();
+          });
+          res.on('close', release);
+          r.upstream.pipe(res);
+          return;
+        }
+
+        const cls = r.cls;
+        log(`[${account.name}] ${channel.id} 上游 ${r.status} ${cls.kind} in ${Date.now() - started}ms: ${String(cls.message || '').slice(0, 160)}`);
+        lastFailure = cls;
+
+        if (cls.kind === 'xext' && xextRetries < MAX_XEXT_RETRIES) {
+          // 旧实例不认识注入的 x_ext: 换实例重试,不计冷却
+          xextRetries++;
+          await new Promise((resolve) => setTimeout(resolve, 80 + xextRetries * 60));
+          continue;
+        }
+        if (cls.kind === 'rate') {
+          // 还有下一条通道可降级就先降级,账号仍可用;已是最后一条才冷却换号
+          const hasNext = channels.indexOf(channel) < channels.length - 1;
+          if (hasNext) {
+            const next = channels[channels.indexOf(channel) + 1];
+            if (next.id === 'v1' && canFallback) log(`[${account.name}] v2 限流,降级 v1 并把模型 ${payload.model} → ${DEFAULT_MODEL}`);
+            else log(`[${account.name}] ${channel.id} 限流,降级 ${next.id}`);
+            break;
+          }
+          pool.markRateLimited(account, cls.message, undefined);
+          nextAccount = true;
+          break;
+        }
+        if (cls.kind === 'quota') {
+          pool.markExhausted(account, cls.message);
+          nextAccount = true;
+          break;
+        }
+        if (cls.kind === 'auth' || cls.kind === 'unconfirmed') {
+          if (cls.kind === 'unconfirmed') {
+            // IAM 会话未 confirm:补一次后同号重试
+            await request('POST', CONFIRM_URL_PATH, { body: '{}', token: account.token }).then((rr) => readJsonBody(rr)).catch(() => {});
+            tried.delete(account.id);
+          } else {
+            pool.markNeedsAuth(account, cls.message);
+            nextAccount = true;
+          }
+          break;
+        }
+        if (r.status >= 500 && badGatewayRetries < 2) {
+          // 上游偶发 5xx(瞬时的) -> 同通道小退避重试
+          badGatewayRetries++;
+          tried.delete(account.id);
+          await new Promise((resolve) => setTimeout(resolve, 800 * badGatewayRetries));
+          continue;
+        }
+
+        // 保留上游错误正文,HTTP200里的业务失败不能作为对话成功返回。
         release();
-        lastFailure = { kind: 'network', message: String(e?.message || e) };
-        continue;
-      }
-
-      if (status >= 200 && status < 300) {
-        // 成功(非流式):记录 usage 后原样返回
-        pool.markSuccess(account);
-        const usage = extractUsage(ct, text);
-        if (usage) recordUsage({ account, model: payload.model, usage });
-        release();
-        res.writeHead(status, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'Content-Type': ct || 'application/json; charset=utf-8' });
-        res.end(text);
+        res.writeHead(r.status >= 300 ? r.status : 502, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'Content-Type': r.ct || 'application/json; charset=utf-8' });
+        res.end(r.text);
         return;
       }
-
-      const cls = classifyUpstream(status, text);
-      log(`[${account.name}] 上游 ${status} ${cls.kind} in ${Date.now() - started}ms: ${String(cls.message || '').slice(0, 160)}`);
-
-      if (cls.kind === 'rate') {
-        pool.markRateLimited(account, cls.message);
-        release();
-        lastFailure = cls;
-        continue;
-      }
-      if (cls.kind === 'quota') {
-        pool.markExhausted(account, cls.message);
-        release();
-        lastFailure = cls;
-        continue;
-      }
-      if (cls.kind === 'auth' || cls.kind === 'unconfirmed') {
-        if (cls.kind === 'unconfirmed') {
-          // IAM 会话未 confirm:补一次后同号重试
-          await request('POST', CONFIRM_URL_PATH, { body: '{}', token: account.token }).then((r) => readJsonBody(r)).catch(() => {});
-          release();
-          tried.delete(account.id);
-        } else {
-          pool.markNeedsAuth(account, cls.message);
-          release();
-        }
-        lastFailure = cls;
-        continue;
-      }
-      if (status >= 500 && badGatewayRetries < 2) {
-        // 上游偶发 5xx(瞬时的) -> 同号小退避重试
-        badGatewayRetries++;
-        release();
-        tried.delete(account.id);
-        lastFailure = cls;
-        await new Promise((r) => setTimeout(r, 800 * badGatewayRetries));
-        continue;
-      }
-
-      // 其余业务错误:原样透传给客户端,不隐藏上游信息
-      release();
-      res.writeHead(status, { 'Cache-Control': 'no-store', 'Access-Control-Allow-Origin': '*', 'Content-Type': ct || 'application/json; charset=utf-8' });
-      res.end(text);
-      return;
+      if (nextAccount) break;
     }
 
-    // 流式成功:边转发边留存,结束后记录 usage
-    pool.markSuccess(account);
-    res.writeHead(status, {
-      'Cache-Control': 'no-store',
-      'Access-Control-Allow-Origin': '*',
-      ...(ct ? { 'Content-Type': ct } : {}),
-    });
-    const captured = [];
-    let capturedSize = 0;
-    upstream.on('data', (chunk) => {
-      if (capturedSize < USAGE_CAPTURE_LIMIT) {
-        captured.push(chunk);
-        capturedSize += chunk.length;
-      }
-    });
-    upstream.on('end', () => {
-      const usage = extractUsage(ct, Buffer.concat(captured).toString('utf8'));
-      if (usage) recordUsage({ account, model: payload.model, usage });
-      release();
-    });
-    upstream.on('error', () => {
-      release();
-      res.destroy();
-    });
-    res.on('close', release);
-    upstream.pipe(res);
-    return;
+    release();
   }
 
   // 全池不可用:按原因返回精确状态码,便于客户端正确退避(而不是一律 503)
@@ -773,7 +1016,7 @@ async function proxyChat(req, res) {
   const exhausted = pool.accounts.filter((a) => a.enabled && pool.statusOf(a) === 'exhausted');
 
   // 1) 只是撞限速冷却:429 + Retry-After,客户端可退避重试
-  if (!needsAuth.length && !exhausted.length && cooling.length) {
+  if (cooling.length) {
     const retryAfter = Math.max(1, Math.ceil((pool.nextReadyIn() || 0) / 1000));
     const body = JSON.stringify({
       error: {
@@ -1014,7 +1257,7 @@ const server = http.createServer(async (req, res) => {
 
     if (route === 'GET /api/points') {
       const account = resolveAccount();
-      const points = await fetchPoints(account);
+      const points = await pointsWithTodayGrant(account);
       const st = checkinOf(account);
       return sendJson(res, 200, {
         ok: true,
@@ -1029,7 +1272,7 @@ const server = http.createServer(async (req, res) => {
       const account = resolveAccount();
       const limit = Math.min(100, Math.max(1, Number(url.searchParams.get('limit')) || 100));
       const bills = await fetchBills(account, limit);
-      const points = await fetchPoints(account).catch(() => null);
+      const points = await pointsWithTodayGrant(account, false, bills).catch(() => null);
       const st = checkinOf(account);
       return sendJson(res, 200, {
         ok: true,
@@ -1047,16 +1290,20 @@ const server = http.createServer(async (req, res) => {
       const already = st.date === today;
       let confirmed = already;
       if (!already) {
-        const r = await doCheckin(account, 'manual').catch((e) => ({ confirmed: false, error: String(e?.message || e) }));
+        const r = await doCheckin(account, 'manual').catch((e) => {
+          st.lastResult = `failed: ${String(e?.message || e).slice(0, 160)}`;
+          saveCheckinState();
+          throw e;
+        });
         confirmed = !!r.confirmed;
-        st.lastResult = confirmed ? 'daily-granted(manual)' : r.error ? `failed: ${r.error.slice(0, 160)}` : 'pending';
+        st.lastResult = confirmed ? 'daily-granted(manual)' : 'pending';
         if (confirmed) {
           st.date = today;
           pointsCache.delete(account.id);
         }
         saveCheckinState();
       }
-      const points = await fetchPoints(account, true).catch(() => null);
+      const points = await pointsWithTodayGrant(account, true).catch(() => null);
       return sendJson(res, 200, {
         ok: true,
         account: { id: account.id, name: account.name },
@@ -1072,7 +1319,7 @@ const server = http.createServer(async (req, res) => {
   } catch (e) {
     log(`error: ${String(e?.message || e)}`);
     if (!res.headersSent) {
-      sendJson(res, 502, { error: { message: String(e?.message || e), type: 'proxy_error' } });
+      sendJson(res, e.statusCode || 502, { error: { message: String(e?.message || e), type: e.type || 'proxy_error', ...(e.retryAfter ? { retry_after: e.retryAfter } : {}) } }, e.retryAfter ? { 'Retry-After': String(e.retryAfter), 'Access-Control-Expose-Headers': 'Retry-After' } : {});
     } else {
       res.destroy();
     }
