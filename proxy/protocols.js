@@ -110,6 +110,16 @@ function resolveModel(name, defaultModel, catalogIds = []) {
   return defaultModel;
 }
 
+/** 请求级扩展不能作为 SDK 关键字参数转发;消息和工具中的同名字段保持原样。 */
+function sanitizeChatPayload(payload) {
+  const { x_ext: _xExt, ...out } = payload;
+  if (out.extra_body && typeof out.extra_body === 'object' && !Array.isArray(out.extra_body)) {
+    const { x_ext: _extraExt, ...extraBody } = out.extra_body;
+    out.extra_body = extraBody;
+  }
+  return out;
+}
+
 /** 把客户端参数白名单化后塞进 payload */
 function applyAllowedParams(target, source) {
   for (const key of UPSTREAM_ALLOWED_PARAMS) {
@@ -1185,6 +1195,7 @@ function anthropicCountTokens(body) {
 
 module.exports = {
   UPSTREAM_ALLOWED_PARAMS,
+  sanitizeChatPayload,
   resolveModel,
   anthropicToChat,
   chatToAnthropic,

@@ -88,7 +88,17 @@ node proxy/server.js   # 默认 http://127.0.0.1:8317,打开 /auth/add 扫码授
 
 环境变量:`PORT` / `HOST` / `PROXY_API_KEY` / `XHX_ACCOUNTS_FILE`(扫码账号池)/ `XHX_TOKEN_FILE`(旧凭证迁移)/ `XHX_CHECKIN_FILE`(领取状态)/ `XHX_USAGE_FILE`(本地用量)/ `XHX_DEVICE_FILE`(可信设备身份)/ `XHX_CLIENT_PLATFORM` / `XHX_CLIENT_VERSION`(上报的设备平台与客户端版本,默认 `desktop-windows` / `1.1.5`)。
 
-上游限流时尊重 `Retry-After`(秒数或HTTP日期),未提供时按本地20秒起指数退避;目录探测成功不会清除对话冷却。积分/账单查询共享30秒缓存与并发请求,429期间阻止重复刷新上游;遇到余额不足时按额度错误处理。仪表盘会显示账号限速状态。上游未公布的限额和恢复时间需要以实际响应为准。
+上游限流时尊重 `Retry-After`（秒数或 HTTP 日期），明确要求等待时不立即降级重发；未提供时按本地 15 分钟起指数退避，上限 30 分钟。目录探测成功不会清除对话冷却。积分/账单查询共享 30 秒缓存与并发请求，429 期间阻止重复刷新上游；遇到余额不足时按额度错误处理。仪表盘会显示账号限速状态。上游未公布的限额和恢复时间需要以实际响应为准。
+
+### `x_ext` SDK 兼容错误
+
+- 三套协议的统一出口移除请求顶层和 `extra_body` 中的 `x_ext`；消息正文、工具 schema 和工具入参中的同名数据不受影响，其他参数保持原有行为。
+- 如果上游仍返回 `unexpected keyword argument 'x_ext'`，不在原通道反复重试，而是尝试一次备用通道。故障按「通道 + 实际模型」隔离 60 秒，到期后重新探测，不影响账号授权或积分状态。
+- 降级到 v1 时使用默认模型 `raccoon-090dd3`，通过 `X-Raccoon-Model-Fallback` 响应头标明实际模型；流式客户端继续收到本地合成的 SSE。
+- SSE 首个数据帧中的错误在发送客户端响应头前处理；正常流式数据原样转发，开始输出后不切通道或重放。
+- 所有可用通道都出现该错误时，返回 HTTP 502，错误码 `upstream_sdk_incompatible`，并标记 `retryable: false`。旧的 `XHX_XEXT_RETRIES` 不再使用。
+
+**修复边界：** 本地参数清理无法阻止远端服务自行注入 `x_ext`。远端维护者仍需在调用 `AsyncCompletions.create()` 前移除该内部字段；确需传给模型服务的扩展，应通过 SDK 支持的 `extra_body` 传递，并确认模型服务接受它。通道切换和短期隔离是容错，不是远端 SDK 已修复的证明。
 
 ## 目录结构
 

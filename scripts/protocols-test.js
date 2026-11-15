@@ -6,6 +6,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { Readable } = require('node:stream');
+const { EventEmitter } = require('node:events');
 const { createRequire } = require('node:module');
 
 process.env.TZ = 'Asia/Shanghai';
@@ -13,7 +14,8 @@ process.env.TZ = 'Asia/Shanghai';
 const ROOT = path.resolve(__dirname, '../..');
 const CLI_FILE = path.join(ROOT, 'server.js');
 const DESKTOP_FILE = path.resolve(__dirname, '../proxy/server.js');
-const protocols = require(path.join(ROOT, 'protocols.js'));
+const HAS_CLI = ['server.js', 'pool.js', 'protocols.js', 'qr.js'].every((file) => fs.existsSync(path.join(ROOT, file)));
+const protocols = require('../proxy/protocols');
 
 // ---------------------------------------------------------------- 测试数据
 
@@ -24,6 +26,10 @@ const CHAT_TEXT_JSON = JSON.stringify({
   object: 'chat.completion',
   choices: [{ index: 0, finish_reason: 'stop', message: { role: 'assistant', content: '你好' } }],
   usage: { prompt_tokens: 11, completion_tokens: 3, total_tokens: 14 },
+});
+
+const XEXT_ERROR = JSON.stringify({
+  error: { type: 'InternalServerError', message: "AsyncCompletions.create() got an unexpected keyword argument 'x_ext'" },
 });
 
 const CHAT_TOOL_JSON = JSON.stringify({
@@ -99,6 +105,7 @@ function makeGateway(file, { router, env = {} } = {}) {
   const requireFromProxy = createRequire(file);
   const poolModule = requireFromProxy('./pool');
   const protocolsModule = requireFromProxy('./protocols');
+  let clock = Date.now();
   const account = {
     id: 'test-account',
     name: '测试账号',
@@ -119,6 +126,7 @@ function makeGateway(file, { router, env = {} } = {}) {
   let handler;
 
   const toStream = (reply) => {
+    if (reply instanceof Readable) return reply;
     const chunks = Array.isArray(reply.chunks) ? reply.chunks : [reply.chunks ?? ''];
     const stream = Readable.from(chunks.map((c) => (Buffer.isBuffer(c) ? c : Buffer.from(String(c)))));
     stream.statusCode = reply.status ?? 200;
@@ -159,9 +167,13 @@ function makeGateway(file, { router, env = {} } = {}) {
     },
     __dirname: path.dirname(file),
     Buffer,
+    AbortController,
     URL,
     URLSearchParams,
-    Date,
+    Date: class extends Date {
+      constructor(...args) { super(...(args.length ? args : [clock])); }
+      static now() { return clock; }
+    },
     console: { log() {}, error() {} },
     process: { env, argv: [], on() {}, stdout: { write() {} } },
     setTimeout(fn) {
@@ -172,16 +184,17 @@ function makeGateway(file, { router, env = {} } = {}) {
 
   vm.runInContext(fs.readFileSync(file, 'utf8'), context, { filename: file });
 
-  const send = async ({ method = 'POST', url, body, headers = {} }) => {
+  const send = async ({ method = 'POST', url, body, headers = {}, onResponse } = {}) => {
     const req = Readable.from(body === undefined ? [] : [Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))]);
     Object.assign(req, { method, url, headers });
     const res = makeRes();
+    if (onResponse) onResponse(res);
     await handler(req, res);
     await res.done;
     return res;
   };
 
-  return { calls, send };
+  return { calls, send, pool: vm.runInContext('pool', context), sdkFailures: vm.runInContext('sdkFailures', context), advance(ms) { clock += ms; } };
 }
 
 function makeRes() {
@@ -190,7 +203,7 @@ function makeRes() {
   const done = new Promise((resolve) => {
     resolveDone = resolve;
   });
-  const res = {
+  const res = Object.assign(new EventEmitter(), {
     status: null,
     headers: {},
     headersSent: false,
@@ -212,22 +225,16 @@ function makeRes() {
     },
     destroy() {
       res.destroyed = true;
+      res.emit('close');
       resolveDone();
     },
-    on() {
-      return res;
-    },
-    once() {
-      return res;
-    },
-  };
+  });
   return res;
 }
 
-const FILES = [
-  [CLI_FILE, 'CLI'],
-  [DESKTOP_FILE, 'desktop'],
-];
+const FILES = [[DESKTOP_FILE, 'desktop']];
+// 独立桌面仓库不依赖父目录;有完整 CLI 源码时追加双份回归。
+if (HAS_CLI) FILES.unshift([CLI_FILE, 'CLI']);
 
 const ANTHROPIC_TOOLS = [
   {
@@ -461,7 +468,7 @@ test('count_tokens:给出正数估算', () => {
 
 // ---------------------------------------------------------------- 网关端到端
 
-test('两份 protocols.js 必须保持一致(CLI 与桌面共用一个实现)', () => {
+test('两份 protocols.js 必须保持一致(CLI 与桌面共用一个实现)', { skip: HAS_CLI ? false : '独立桌面仓库无 CLI 源码' }, () => {
   const cli = fs.readFileSync(path.join(ROOT, 'protocols.js'), 'utf8');
   const desktop = fs.readFileSync(path.resolve(__dirname, '../proxy/protocols.js'), 'utf8');
   assert.equal(cli, desktop, 'desktop/proxy/protocols.js 需要从根目录同步复制');
@@ -470,6 +477,246 @@ test('两份 protocols.js 必须保持一致(CLI 与桌面共用一个实现)', 
 for (const [file, name] of FILES) {
   const jsonRouter = (body) => () => ({ headers: { 'content-type': 'application/json' }, chunks: [body] });
   const sseRouter = (body) => () => ({ headers: { 'content-type': 'text/event-stream; charset=utf-8' }, chunks: [body] });
+
+  test(`${name}: 清除请求级x_ext但保留消息和工具中的同名数据`, async () => {
+    const payload = {
+      model: 'sn-kimi-k3',
+      messages: [{ role: 'user', content: '{"x_ext":"这是用户内容"}' }],
+      tools: [{ type: 'function', function: { name: 'read_ext', parameters: { type: 'object', properties: { x_ext: { type: 'string' } } } } }],
+      tool_choice: 'auto',
+      temperature: 0.2,
+      x_ext: { tracing: true },
+      extra_body: { x_ext: { tracing: true }, reasoning_effort: 'low' },
+    };
+    const gw = makeGateway(file, {
+      router(call) {
+        const upstream = JSON.parse(call.body);
+        const unsafe = Object.hasOwn(upstream, 'x_ext') || Object.hasOwn(upstream.extra_body || {}, 'x_ext');
+        return { status: unsafe ? 500 : 200, headers: { 'content-type': 'application/json' }, chunks: [unsafe ? XEXT_ERROR : CHAT_TEXT_JSON] };
+      },
+    });
+    const res = await gw.send({ url: '/v1/chat/completions', body: payload });
+    assert.equal(res.status, 200);
+    assert.equal(JSON.parse(res.body).choices[0].message.content, '你好');
+    assert.equal(gw.calls.length, 1);
+    const upstream = JSON.parse(gw.calls[0].body);
+    assert.equal(Object.hasOwn(upstream, 'x_ext'), false);
+    assert.equal(Object.hasOwn(upstream.extra_body, 'x_ext'), false);
+    assert.equal(upstream.extra_body.reasoning_effort, 'low');
+    assert.equal(upstream.model, 'sn-kimi-k3');
+    assert.equal(upstream.messages[0].content, '{"x_ext":"这是用户内容"}');
+    assert.deepEqual(upstream.tools[0].function.parameters.properties, { x_ext: { type: 'string' } });
+    assert.equal(upstream.tool_choice, 'auto');
+    assert.equal(upstream.temperature, 0.2);
+    assert.equal(payload.x_ext.tracing, true);
+  });
+
+  test(`${name}: v1降级请求也不会携带客户端x_ext`, async () => {
+    const gw = makeGateway(file, {
+      router(call) {
+        if (call.path.includes('/v2/')) return { status: 429, headers: { 'content-type': 'application/json' }, chunks: ['{"error":{"type":"rate_limit_error"}}'] };
+        const upstream = JSON.parse(call.body);
+        const unsafe = Object.hasOwn(upstream, 'x_ext');
+        return { status: unsafe ? 500 : 200, headers: { 'content-type': 'application/json' }, chunks: [unsafe ? XEXT_ERROR : CHAT_TEXT_JSON] };
+      },
+    });
+    const res = await gw.send({
+      url: '/v1/chat/completions',
+      body: { model: 'sn-kimi-k3', x_ext: { tracing: true }, messages: [{ role: 'user', content: 'hi' }] },
+    });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['X-Raccoon-Model-Fallback'], 'raccoon-090dd3');
+    assert.equal(gw.calls.length, 2);
+    const upstream = JSON.parse(gw.calls[1].body);
+    assert.equal(Object.hasOwn(upstream, 'x_ext'), false);
+    assert.equal(upstream.model, 'raccoon-090dd3');
+    assert.equal(upstream.stream, false);
+  });
+
+  for (const [url, body] of [
+    ['/v1/chat/completions', { model: 'sn-kimi-k3', stream: true, messages: [{ role: 'user', content: 'hi' }] }],
+    ['/v1/messages', { model: 'claude-x', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] }],
+    ['/v1/responses', { model: 'gpt-5-codex', stream: true, input: 'hi' }],
+  ]) {
+    test(`${name}: ${url}遇x_ext兼容错误直接切通道且流式响应完整`, async () => {
+      const gw = makeGateway(file, {
+        router(call) {
+          return { status: call.path.includes('/v2/') ? 500 : 200, headers: { 'content-type': 'application/json' }, chunks: [call.path.includes('/v2/') ? XEXT_ERROR : CHAT_TEXT_JSON] };
+        },
+      });
+      const res = await gw.send({ url, body });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers['X-Raccoon-Sse-Replay'], '1');
+      assert.deepEqual(gw.calls.map((call) => call.path), ['/api/web/llm/v2/chat/completions', '/api/web/llm/v1/chat/completions']);
+      const events = parseEvents(res.body);
+      if (url === '/v1/chat/completions') {
+        assert.equal(events.filter((e) => e.json?.choices?.[0]?.delta?.content).map((e) => e.json.choices[0].delta.content).join(''), '你好');
+        assert.equal(events.at(-1).data, '[DONE]');
+        assert.equal(res.headers['X-Raccoon-Model-Fallback'], 'raccoon-090dd3');
+      } else if (url === '/v1/messages') {
+        assert.equal(events.at(-1).event, 'message_stop');
+        assert.equal(events.filter((e) => e.event === 'content_block_delta').map((e) => e.json.delta.text).join(''), '你好');
+      } else {
+        assert.equal(events.at(-1).event, 'response.completed');
+        assert.equal(events.at(-1).json.response.output_text, '你好');
+      }
+      assert.equal(gw.pool.accounts[0].enabled, true);
+      assert.equal(gw.pool.statusOf(gw.pool.accounts[0]), 'active');
+      assert.equal(gw.pool.list()[0].inFlight, 0);
+    });
+  }
+
+  test(`${name}: 持续x_ext错误不原地重试且不误报无可用账号`, async () => {
+    const gw = makeGateway(file, {
+      env: { XHX_XEXT_RETRIES: '12' },
+      router: () => ({ status: 500, headers: { 'content-type': 'application/json' }, chunks: [XEXT_ERROR] }),
+    });
+    const res = await gw.send({ url: '/v1/chat/completions', body: { model: 'sn-kimi-k3', messages: [{ role: 'user', content: 'hi' }] } });
+    assert.equal(res.status, 502);
+    const error = JSON.parse(res.body).error;
+    assert.equal(error.code, 'upstream_sdk_incompatible');
+    assert.equal(error.type, 'upstream_compatibility_error');
+    assert.equal(error.retryable, false);
+    assert.match(error.message, /x_ext/);
+    assert.doesNotMatch(error.message, /无可用账号|扫码|积分不足|限速/);
+    assert.deepEqual(gw.calls.map((call) => call.path), ['/api/web/llm/v2/chat/completions', '/api/web/llm/v1/chat/completions']);
+    assert.equal(gw.pool.accounts[0].enabled, true);
+    assert.equal(gw.pool.statusOf(gw.pool.accounts[0]), 'active');
+    assert.equal(gw.pool.list()[0].inFlight, 0);
+  });
+
+  test(`${name}: x_ext首帧SSE错误在发给客户端前处理`, async () => {
+    const gw = makeGateway(file, {
+      router(call) {
+        if (call.path.includes('/v2/')) return { headers: { 'content-type': 'text/event-stream' }, chunks: [': ping\r\n\r\ndata: {"err', `${XEXT_ERROR.slice(5)}\r\n\r\ndata: [DONE]\r\n\r\n`] };
+        return { headers: { 'content-type': 'application/json' }, chunks: [CHAT_TEXT_JSON] };
+      },
+    });
+    const res = await gw.send({ url: '/v1/messages', body: { model: 'claude-x', max_tokens: 100, stream: true, messages: [{ role: 'user', content: 'hi' }] } });
+    const events = parseEvents(res.body);
+    assert.equal(events.at(-1).event, 'message_stop');
+    assert.equal(events.filter((e) => e.event === 'content_block_delta').map((e) => e.json.delta.text).join(''), '你好');
+    assert.equal(events.some((e) => e.event === 'error'), false);
+    assert.equal(res.headers['X-Raccoon-Sse-Replay'], '1');
+    assert.equal(gw.calls.length, 2);
+  });
+
+  test(`${name}: 兼容故障按模型隔离,短期跳过坏通道并在到期后再探测`, async () => {
+    const gw = makeGateway(file, {
+      router(call) {
+        const model = JSON.parse(call.body).model;
+        if (call.path.includes('/v2/') && model === 'sn-kimi-k3') return { status: 500, headers: { 'content-type': 'application/json' }, chunks: [XEXT_ERROR] };
+        return { headers: { 'content-type': 'application/json' }, chunks: [CHAT_TEXT_JSON] };
+      },
+    });
+    const send = (model) => gw.send({ url: '/v1/chat/completions', body: { model, messages: [{ role: 'user', content: 'hi' }] } });
+    assert.equal((await send('sn-kimi-k3')).status, 200);
+    assert.equal((await send('sn-kimi-k3')).status, 200);
+    assert.equal((await send('SenseChat-5')).status, 200);
+    gw.advance(10 * 60 * 1000);
+    assert.equal((await send('sn-kimi-k3')).status, 200);
+    assert.deepEqual(gw.calls.map((call) => call.path), [
+      '/api/web/llm/v2/chat/completions', '/api/web/llm/v1/chat/completions',
+      '/api/web/llm/v1/chat/completions', '/api/web/llm/v2/chat/completions',
+      '/api/web/llm/v2/chat/completions', '/api/web/llm/v1/chat/completions',
+    ]);
+    assert.equal(gw.pool.statusOf(gw.pool.accounts[0]), 'active');
+    assert.equal(gw.pool.list()[0].inFlight, 0);
+  });
+
+  for (const sdkChannel of ['v1', 'v2']) {
+    test(`${name}: SDK故障与限流并存时保留可恢复的429(${sdkChannel})`, async () => {
+      const gw = makeGateway(file, {
+        router(call) {
+          const sdk = call.path.includes(`/${sdkChannel}/`);
+          return { status: sdk ? 500 : 429, headers: { 'content-type': 'application/json' }, chunks: [sdk ? XEXT_ERROR : '{"error":{"type":"rate_limit_error","message":"Too many requests"}}'] };
+        },
+      });
+      const res = await gw.send({ url: '/v1/chat/completions', body: { model: 'sn-kimi-k3', messages: [{ role: 'user', content: 'hi' }] } });
+      assert.equal(res.status, 429);
+      assert.equal(JSON.parse(res.body).error.type, 'rate_limit_error');
+      assert.ok(Number(res.headers['Retry-After']) > 0);
+      assert.equal(gw.pool.statusOf(gw.pool.accounts[0]), 'cooldown');
+      assert.equal(gw.pool.list()[0].inFlight, 0);
+      assert.equal(gw.calls.length, 2);
+    });
+  }
+
+  test(`${name}: 过期SDK隔离不影响其他模型且内存记录被回收`, async () => {
+    const gw = makeGateway(file, { router: () => ({ status: 500, headers: { 'content-type': 'application/json' }, chunks: [XEXT_ERROR] }) });
+    for (let i = 0; i < 4; i++) {
+      await gw.send({ url: '/v1/chat/completions', body: { model: `test-model-${i}`, messages: [{ role: 'user', content: 'hi' }] } });
+    }
+    assert.equal(gw.sdkFailures.size, 5);
+    gw.advance(120000);
+    await gw.send({ url: '/v1/chat/completions', body: { model: 'new-model', messages: [{ role: 'user', content: 'hi' }] } });
+    assert.equal(gw.sdkFailures.size, 2);
+  });
+
+  for (const chunks of [[], [': ping\n\n'], ['data: [DONE]']]) {
+    test(`${name}: 空或仅心跳SSE会完成响应并释放并发槽(${JSON.stringify(chunks)})`, async () => {
+      const gw = makeGateway(file, { router: () => ({ headers: { 'content-type': 'text/event-stream' }, chunks }) });
+      const timeout = Symbol('timeout');
+      const result = await Promise.race([
+        gw.send({ url: '/v1/chat/completions', body: { model: 'sn-kimi-k3', stream: true, messages: [{ role: 'user', content: 'hi' }] } }),
+        new Promise((resolve) => setTimeout(() => resolve(timeout), 100)),
+      ]);
+      assert.notEqual(result, timeout, '上游结束后本地响应不能永远挂起');
+      assert.equal(result.body, chunks.join(''));
+      assert.equal(gw.pool.list()[0].inFlight, 0);
+      assert.equal(gw.calls.length, 1);
+    });
+  }
+
+  test(`${name}: 等首帧期间客户端断开会销毁上游并释放并发槽`, async () => {
+    const upstream = new Readable({ read() {} });
+    upstream.statusCode = 200;
+    upstream.headers = { 'content-type': 'text/event-stream' };
+    let resolveAttached;
+    const attached = new Promise((resolve) => { resolveAttached = resolve; });
+    const on = upstream.on.bind(upstream);
+    upstream.on = (event, fn) => {
+      const result = on(event, fn);
+      if (event === 'data') resolveAttached();
+      return result;
+    };
+    const gw = makeGateway(file, { router: () => upstream });
+    let res;
+    const sending = gw.send({
+      url: '/v1/chat/completions',
+      body: { model: 'sn-kimi-k3', stream: true, messages: [{ role: 'user', content: 'hi' }] },
+      onResponse(value) { res = value; },
+    });
+    await attached;
+    res.destroy();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(upstream.destroyed, true);
+    assert.equal(gw.pool.list()[0].inFlight, 0);
+    assert.equal(res.headersSent, false);
+    const timeout = Symbol('timeout');
+    assert.notEqual(await Promise.race([sending, new Promise((resolve) => setTimeout(() => resolve(timeout), 100))]), timeout);
+    assert.equal(gw.calls.length, 1);
+  });
+
+  test(`${name}: 已建立并输出的SSE不会被重放或切通道`, async () => {
+    const gw = makeGateway(file, { router: sseRouter(STREAM_TEXT) });
+    const res = await gw.send({ url: '/v1/chat/completions', body: { model: 'sn-kimi-k3', stream: true, messages: [{ role: 'user', content: 'hi' }] } });
+    assert.equal(res.body, STREAM_TEXT);
+    assert.equal(gw.calls.length, 1);
+  });
+
+  test(`${name}: 普通临时500仍能小退避恢复`, async () => {
+    let failures = 0;
+    const gw = makeGateway(file, {
+      router() {
+        if (failures++ === 0) return { status: 500, headers: { 'content-type': 'application/json' }, chunks: ['{"error":{"message":"temporary backend failure"}}'] };
+        return { headers: { 'content-type': 'application/json' }, chunks: [CHAT_TEXT_JSON] };
+      },
+    });
+    const res = await gw.send({ url: '/v1/chat/completions', body: { model: 'sn-kimi-k3', messages: [{ role: 'user', content: 'hi' }] } });
+    assert.equal(res.status, 200);
+    assert.deepEqual(gw.calls.map((call) => call.path), ['/api/web/llm/v2/chat/completions', '/api/web/llm/v2/chat/completions']);
+  });
 
   test(`${name}: /v1/chat/completions 仍按 OpenAI 形状透传`, async () => {
     const gw = makeGateway(file, { router: jsonRouter(CHAT_TEXT_JSON) });

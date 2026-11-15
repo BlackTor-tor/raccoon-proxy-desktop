@@ -80,8 +80,8 @@ function classifyUpstream(status, text) {
 
   if (Number(code) === 200901) return { kind: 'unconfirmed', message: msg };
   if (status === 401 || status === 403) return { kind: 'auth', message: msg };
-  // v1 通道会注入 x_ext,部分旧实例的 SDK 不认识它: 换实例重试即可,不该计冷却
-  if (/unexpected keyword argument 'x_ext'/.test(raw)) return { kind: 'xext', message: msg };
+  // SDK 参数不兼容不是限流或瞬时 5xx;从解码后的消息识别,兼容 JSON 转义引号。
+  if (/unexpected\s+keyword\s+argument\s+['"]x_ext['"]/i.test(msg)) return { kind: 'xext', message: msg };
   const errorType = String(json?.error?.type || code || '');
   const quotaMessage = /(?:积分|额度|配额|余额).{0,20}(?:不足|用尽|耗尽)|(?:insufficient|exhausted|depleted).{0,20}(?:points|quota|credits|balance)|(?:points|quota|credits|balance).{0,20}(?:insufficient|exhausted|depleted)/i;
   if (status === 402 || /insufficient_quota|insufficient_points|quota_exhausted/i.test(errorType) || quotaMessage.test(msg)) return { kind: 'quota', message: msg };

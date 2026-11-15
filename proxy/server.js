@@ -15,6 +15,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const https = require('https');
+const { Readable } = require('stream');
 const { AccountPool, classifyUpstream, parseRetryAfter, jwtExp } = require('./pool');
 const qrCodec = require('./qr');
 const protocols = require('./protocols');
@@ -63,7 +64,8 @@ const PROXY_API_KEY = process.env.PROXY_API_KEY || '';
 // 上游是文本模型:默认把图片降级成占位文字,置 XHX_VISION=1 才原样转发 image_url
 const XHX_VISION = /^(1|true|yes|on)$/i.test(process.env.XHX_VISION || '');
 const MAX_CHAT_ATTEMPTS = Math.max(2, Number(process.env.XHX_MAX_ATTEMPTS) || 4); // 一次请求最多换几个号
-const MAX_XEXT_RETRIES = Math.max(1, Number(process.env.XHX_XEXT_RETRIES) || 12); // v1 通道 x_ext 500 的原地重试上限
+const SDK_FAILURE_TTL_MS = 60 * 1000; // 按通道+实际模型短期跳过 SDK 不兼容后端,到期再探测
+const sdkFailures = new Map();
 const COOLDOWN_WAIT_MS = Number(process.env.XHX_COOLDOWN_WAIT_MS) || 25 * 1000; // 全池冷却时最多等多久再重试
 const SLOT_WAIT_MS = Number(process.env.XHX_SLOT_WAIT_MS) || 60 * 1000; // 并发槽位满时最多排队等多久
 
@@ -71,7 +73,7 @@ function log(msg) {
   console.log(`[${new Date().toISOString()}] ${msg}`);
 }
 
-function request(method, urlPath, { body, token, headers: extraHeaders, timeoutMs = 120000 } = {}) {
+function request(method, urlPath, { body, token, headers: extraHeaders, timeoutMs = 120000, signal } = {}) {
   return new Promise((resolve, reject) => {
     const headers = {
       'User-Agent': USER_AGENT,
@@ -87,7 +89,7 @@ function request(method, urlPath, { body, token, headers: extraHeaders, timeoutM
     }
     if (token) headers.Authorization = `Bearer ${token}`;
     const req = https.request(
-      { hostname: UPSTREAM_HOST, path: urlPath, method, headers, timeout: timeoutMs },
+      { hostname: UPSTREAM_HOST, path: urlPath, method, headers, timeout: timeoutMs, signal },
       (res) => resolve(res)
     );
     req.on('timeout', () => req.destroy(new Error('upstream timeout')));
@@ -787,10 +789,11 @@ function readRequestBody(req, limit = 20 * 1024 * 1024) {
  * 发一次上游对话请求并分类。
  * 成功(含流式)返回未消费的 upstream;失败返回已读干净的正文与分类结果。
  */
-async function chatOnce(account, channel, jsonBody) {
+async function chatOnce(account, channel, jsonBody, signal) {
   const upstream = await request('POST', channel.path, {
     body: jsonBody,
     token: account.token,
+    signal,
     // 上游对复用 keep-alive 连接的流式响应不计费(实测),强制新连接确保每笔对话都入账
     headers: {
       Connection: 'close',
@@ -800,10 +803,19 @@ async function chatOnce(account, channel, jsonBody) {
     },
   });
 
+  if (signal?.aborted) {
+    upstream.destroy();
+    throw new Error('client disconnected');
+  }
+  const abort = () => upstream.destroy(new Error('client disconnected'));
+  signal?.addEventListener('abort', abort, { once: true });
+  upstream.once('close', () => signal?.removeEventListener('abort', abort));
+
   const status = upstream.statusCode || 502;
   const ct = String(upstream.headers['content-type'] || '');
   const isEventStream = /event-stream/i.test(ct);
 
+  const retryAfter = upstream.headers['retry-after'];
   // 失败响应 / 非流式响应:先读完整 body 再决策
   if (status >= 300 || !isEventStream) {
     const text = await readJsonBody(upstream);
@@ -811,12 +823,97 @@ async function chatOnce(account, channel, jsonBody) {
     try { json = JSON.parse(text); } catch {}
     const businessError = json && (json.error || (json.code !== undefined && Number(json.code) !== 0));
     if (status >= 200 && status < 300 && !businessError) return { ok: true, upstream, status, ct, text };
-    return { ok: false, status, ct, text, cls: classifyUpstream(status, text) };
+    return { ok: false, status, ct, text, retryAfter, cls: classifyUpstream(status, text) };
   }
 
-  // 流式: 先暂停,避免 await 期间数据流走丢失
-  upstream.pause();
+  // 先检查首个数据帧,避免 HTTP200 的 SSE 错误被当作成功;正常字节放回流中原样输出。
+  const first = await peekStreamError(upstream);
+  if (first.error) {
+    upstream.destroy();
+    return { ok: false, status: 502, ct: 'application/json', text: first.error, retryAfter, cls: classifyUpstream(502, first.error) };
+  }
+  if (first.ended) {
+    const replay = Readable.from(first.buffer.length ? [first.buffer] : []);
+    replay.on('error', () => {});
+    return { ok: true, upstream: replay, status, ct, stream: true };
+  }
   return { ok: true, upstream, status, ct, stream: true };
+}
+
+function peekStreamError(upstream) {
+  return new Promise((resolve, reject) => {
+    let buffered = Buffer.alloc(0);
+    let settled = false;
+    const cleanup = () => {
+      upstream.pause();
+      upstream.removeListener('data', onData);
+      upstream.removeListener('end', onEnd);
+      upstream.removeListener('close', onClose);
+      upstream.removeListener('error', onError);
+    };
+    const finish = (error = null, ended = false) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (!error && !ended && buffered.length) upstream.unshift(buffered);
+      resolve({ error, ended, buffer: buffered });
+    };
+    const dataError = (line) => {
+      if (!line.startsWith('data:')) return undefined;
+      const data = line.slice(5).trim();
+      if (!data) return undefined;
+      let json = null;
+      try { json = JSON.parse(data); } catch {}
+      return json && (json.error || (json.code !== undefined && Number(json.code) !== 0)) ? data : null;
+    };
+    const onData = (chunk) => {
+      buffered = Buffer.concat([buffered, chunk]);
+      for (const line of buffered.toString('utf8').split(/\r?\n/).slice(0, -1)) {
+        const error = dataError(line);
+        if (error === undefined) continue;
+        finish(error);
+        return;
+      }
+      if (buffered.length >= 64 * 1024) finish();
+    };
+    const onEnd = () => {
+      const error = buffered.toString('utf8').split(/\r?\n/).map(dataError).find((v) => v !== undefined);
+      finish(error || null, true);
+    };
+    const onError = (error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+    const onClose = () => onError(new Error('upstream closed before first SSE frame'));
+    upstream.on('data', onData);
+    upstream.once('end', onEnd);
+    upstream.once('close', onClose);
+    upstream.once('error', onError);
+    upstream.resume();
+  });
+}
+
+/** SDK 故障与账号状态无关,按通道和实际模型隔离,不把账号误标为限速或待授权。 */
+function sdkFailureKey(channel, model) {
+  return `${channel.id}:${channel.id === 'v1' ? DEFAULT_MODEL : model}`;
+}
+
+function sdkCompatibilityError(detail) {
+  return {
+    ok: false,
+    status: 502,
+    body: JSON.stringify({
+      error: {
+        message: '上游 SDK 不支持 x_ext 参数,可用通道均无法完成请求;需要上游在调用 SDK 前移除或正确封装该扩展参数。',
+        type: 'upstream_compatibility_error',
+        code: 'upstream_sdk_incompatible',
+        retryable: false,
+        detail: String(detail || '').slice(0, 500),
+      },
+    }),
+  };
 }
 
 /**
@@ -836,6 +933,7 @@ async function chatOnce(account, channel, jsonBody) {
  * @returns {{ok:true}|{ok:false,status:number,body:string,headers?:object}}
  */
 async function runChatCore(payload, { res, onResult, onStream }) {
+  payload = protocols.sanitizeChatPayload(payload);
   const jsonBody = JSON.stringify(payload);
   // 降级到 v1 的请求体: 模型换成默认模型(v1 只认它), 且必须 stream:false
   // 实测 v1 对 stream:true 稳定 500(0/10), 非流式则约五成可通;
@@ -844,6 +942,9 @@ async function runChatCore(payload, { res, onResult, onStream }) {
   const fallbackBody = JSON.stringify({ ...fallbackPayload, model: DEFAULT_MODEL, stream: false });
   const canFallback = payload.model !== DEFAULT_MODEL;
 
+  for (const [key, failure] of sdkFailures) {
+    if (failure.until <= Date.now()) sdkFailures.delete(key);
+  }
   const tried = new Set();
   let lastFailure = null;
   let badGatewayRetries = 0;
@@ -871,33 +972,59 @@ async function runChatCore(payload, { res, onResult, onStream }) {
     pool.acquire(account);
 
     let released = false;
+    const controller = new AbortController();
     const release = () => {
       if (released) return;
       released = true;
+      res.removeListener('close', cancel);
       pool.release(account);
     };
+    const cancel = () => {
+      controller.abort();
+      release();
+    };
+    res.once('close', cancel);
+    if (res.destroyed) {
+      cancel();
+      return { ok: true };
+    }
 
-    // 本号内逐通道尝试: v2 撞限流不冷却账号,降级 v1;v1 也撞才冷却换号
-    // v1 只认默认模型,所以非默认模型降级时把 model 改写成默认模型(auto 路由)
-    const channels = V1_MODELS.has(payload.model) ? [...CHAT_CHANNELS] : [CHAT_CHANNELS[0], CHAT_CHANNELS[1]];
+    // 本号内逐通道尝试;确定性 SDK 故障按通道+模型短期跳过,不靠原地重试碰运气。
+    const channels = [...CHAT_CHANNELS];
     let nextAccount = false;
+    let compatibilityFailure = null;
+    let rateFailure = null;
     for (const channel of channels) {
+      const sdkKey = sdkFailureKey(channel, payload.model);
+      const blocked = sdkFailures.get(sdkKey);
+      if (blocked && blocked.until > Date.now()) {
+        compatibilityFailure = blocked.message;
+        log(`[${account.name}] ${channel.id} SDK 不兼容,跳过当前模型通道`);
+        continue;
+      }
+      sdkFailures.delete(sdkKey);
       // v1 通道一律用默认模型,其余通道用原模型
       const body = channel.id === 'v1' ? fallbackBody : jsonBody;
-      let xextRetries = 0;
       while (!nextAccount) {
+        if (controller.signal.aborted) return { ok: true };
         const started = Date.now();
         let r;
         try {
-          r = await chatOnce(account, channel, body);
+          r = await chatOnce(account, channel, body, controller.signal);
         } catch (e) {
+          if (controller.signal.aborted) return { ok: true };
           lastFailure = { kind: 'network', message: String(e?.message || e) };
           log(`[${account.name}] ${channel.id} 上游网络错误: ${lastFailure.message}`);
           nextAccount = true;
           break;
         }
 
+        if (controller.signal.aborted) {
+          r.upstream?.destroy();
+          return { ok: true };
+        }
         if (r.ok) {
+          sdkFailures.delete(sdkKey);
           log(`[${account.name}] ${channel.id} 上游 ${r.status} 成功 in ${Date.now() - started}ms`);
           // 降级改写过模型时,用响应头告知客户端实际模型
           const usedModel = channel.id === 'v1' && canFallback ? DEFAULT_MODEL : payload.model;
@@ -927,7 +1054,6 @@ async function runChatCore(payload, { res, onResult, onStream }) {
             release();
           });
           r.upstream.on('error', release);
-          res.on('close', release);
           onStream({ status: r.status, ct: r.ct, upstream: r.upstream, model: usedModel, requestModel: payload.model, extraHeaders: modelHeader });
           return { ok: true };
         }
@@ -936,22 +1062,24 @@ async function runChatCore(payload, { res, onResult, onStream }) {
         log(`[${account.name}] ${channel.id} 上游 ${r.status} ${cls.kind} in ${Date.now() - started}ms: ${String(cls.message || '').slice(0, 160)}`);
         lastFailure = cls;
 
-        if (cls.kind === 'xext' && xextRetries < MAX_XEXT_RETRIES) {
-          // 旧实例不认识注入的 x_ext: 换实例重试,不计冷却
-          xextRetries++;
-          await new Promise((resolve) => setTimeout(resolve, 80 + xextRetries * 60));
-          continue;
+        if (cls.kind === 'xext') {
+          sdkFailures.set(sdkKey, { until: Date.now() + SDK_FAILURE_TTL_MS, message: cls.message });
+          if (sdkFailures.size > 256) sdkFailures.delete(sdkFailures.keys().next().value);
+          compatibilityFailure = cls.message;
+          log(`[${account.name}] ${channel.id} SDK 不支持 x_ext,不原地重试,尝试下一通道`);
+          break;
         }
         if (cls.kind === 'rate') {
-          // 还有下一条通道可降级就先降级,账号仍可用;已是最后一条才冷却换号
+          rateFailure = r;
+          // 上游明确要求等待时不立即降级重发,完整保留 Retry-After。
           const hasNext = channels.indexOf(channel) < channels.length - 1;
-          if (hasNext) {
+          if (hasNext && !parseRetryAfter(r.retryAfter)) {
             const next = channels[channels.indexOf(channel) + 1];
             if (next.id === 'v1' && canFallback) log(`[${account.name}] v2 限流,降级 v1 并把模型 ${payload.model} → ${DEFAULT_MODEL}`);
             else log(`[${account.name}] ${channel.id} 限流,降级 ${next.id}`);
             break;
           }
-          pool.markRateLimited(account, cls.message, undefined);
+          pool.markRateLimited(account, cls.message, r.retryAfter);
           nextAccount = true;
           break;
         }
@@ -986,7 +1114,13 @@ async function runChatCore(payload, { res, onResult, onStream }) {
       if (nextAccount) break;
     }
 
+    if (rateFailure && !nextAccount) {
+      pool.markRateLimited(account, rateFailure.cls.message, rateFailure.retryAfter);
+      lastFailure = rateFailure.cls;
+      nextAccount = true;
+    }
     release();
+    if (compatibilityFailure && !nextAccount) return sdkCompatibilityError(compatibilityFailure);
   }
 
   // 全池不可用:按原因返回精确状态码,便于客户端正确退避(而不是一律 503)

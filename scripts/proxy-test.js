@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
 const { Readable } = require('node:stream');
+const { EventEmitter } = require('node:events');
 const { createRequire } = require('node:module');
 
 process.env.TZ = 'Asia/Shanghai';
@@ -28,7 +29,7 @@ function loadProxy(file) {
       return requireFromProxy(name);
     },
     __dirname: path.dirname(file),
-    Buffer, URL, URLSearchParams,
+    Buffer, AbortController, URL, URLSearchParams,
     Date: class extends Date {
       constructor(...args) { super(...(args.length ? args : [clock])); }
       static now() { return clock; }
@@ -59,12 +60,12 @@ async function route(proxy, method, url, body) {
   const req = Readable.from(body ? [Buffer.from(JSON.stringify(body))] : []);
   Object.assign(req, { method, url, headers: {} });
   const result = { headers: {}, status: null, json: null };
-  const res = {
+  const res = Object.assign(new EventEmitter(), {
     headersSent: false,
     writeHead(status, headers) { this.headersSent = true; result.status = status; result.headers = headers; },
     end(text) { result.json = JSON.parse(text); },
     destroy() { throw new Error('unexpected connection destruction'); },
-  };
+  });
   await proxy.handler(req, res);
   return result;
 }
@@ -193,6 +194,29 @@ for (const file of files) {
     assert.equal(result.status, 429);
     assert.ok(Number(result.headers['Retry-After']) >= 89);
     assert.equal(calls, 1);
+  });
+
+  test(`${name}: 对话Retry-After超过本地退避上限时仍完整保留`, async () => {
+    const proxy = loadProxy(file);
+    let calls = 0;
+    proxy.set('request', async () => { calls++; return response(429, { error: { type: 'rate_limit_error', message: 'Too many requests' } }, { 'retry-after': '3600' }); });
+    const result = await route(proxy, 'POST', '/v1/chat/completions', { model: 'test-model', messages: [{ role: 'user', content: 'test' }] });
+    assert.equal(result.status, 429);
+    assert.ok(Number(result.headers['Retry-After']) >= 3600);
+    assert.equal(calls, 1);
+  });
+
+  test(`${name}: SDK兼容错误识别单双引号与JSON转义`, () => {
+    const { classifyUpstream } = createRequire(file)('./pool');
+    for (const text of [
+      "AsyncCompletions.create() got an unexpected keyword argument 'x_ext'",
+      JSON.stringify({ error: { message: 'AsyncCompletions.create() got an unexpected keyword argument "x_ext"' } }),
+      JSON.stringify({ message: "AsyncCompletions.create() got an Unexpected Keyword Argument 'x_ext'" }),
+    ]) {
+      assert.equal(classifyUpstream(500, text).kind, 'xext');
+    }
+    assert.equal(classifyUpstream(500, JSON.stringify({ error: { message: "unexpected keyword argument 'temperature'" } })).kind, 'transient');
+    assert.equal(classifyUpstream(500, 'x_ext is optional').kind, 'transient');
   });
 
   test(`${name}: HTTP200业务限流也应返回429`, async () => {
