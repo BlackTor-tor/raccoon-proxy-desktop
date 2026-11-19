@@ -287,6 +287,13 @@ test('Anthropic→Chat:system/tool_use/tool_result 正确映射,stop_sequences �
   assert.equal(payload.messages[3].content, '12:00');
 });
 
+test('Chat原生 image_url:vision 关闭时降级,开启时保持原样', () => {
+  const payload = { model: 'm1', messages: [{ role: 'user', content: [{ type: 'text', text: '看图' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }] }] };
+  const stripped = protocols.stripChatImages(payload);
+  assert.deepEqual(stripped.messages[0].content, [{ type: 'text', text: '看图' }, { type: 'text', text: '[图片已省略:当前上游不支持视觉输入]' }]);
+  assert.equal(payload.messages[0].content[1].type, 'image_url');
+});
+
 test('Anthropic→Chat:图片默认降级成占位文字,vision 开启才转发 image_url', () => {
   const body = {
     model: 'claude-x',

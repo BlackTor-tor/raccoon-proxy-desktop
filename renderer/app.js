@@ -15,9 +15,9 @@ const state = {
   variant: 'setup', // 客户端形态:setup(安装版)/ portable(便携版),由主进程状态同步
   settings: {
     port: Number.isInteger(saved.port) && saved.port >= 1024 && saved.port <= 65535 ? saved.port : 8317,
-    apiKey: '', autoStart: saved.autoStart === true,
+    apiKey: '', autoStart: saved.autoStart === true, vision: saved.vision === true,
   },
-  autoStartDraft: false, messages: [], logCount: 4, keyVisible: false, controller: null,
+  autoStartDraft: false, visionDraft: false, messages: [], logCount: 4, keyVisible: false, controller: null,
   pointsAvailable: null,
   conversations: storage.get('conversations', []), currentId: null,
 };
@@ -175,11 +175,11 @@ function applyUpstream(h) {
 
 /* ---------- 设置 ---------- */
 
-function populateSettings() { const s = state.settings; $('port').value = s.port; $('local-key').value = s.apiKey; state.autoStartDraft = s.autoStart; $('auto-start').setAttribute('aria-checked', String(s.autoStart)); }
+function populateSettings() { const s = state.settings; $('port').value = s.port; $('local-key').value = s.apiKey; state.autoStartDraft = s.autoStart; $('auto-start').setAttribute('aria-checked', String(s.autoStart)); state.visionDraft = s.vision === true; $('vision-forward').setAttribute('aria-checked', String(state.visionDraft)); }
 function validateSettings() {
   ['port', 'key'].forEach(id => $(id + '-error').textContent = '');
   ['port', 'local-key'].forEach(id => $(id).removeAttribute('aria-invalid'));
-  const value = { port: Number($('port').value), apiKey: $('local-key').value.trim(), autoStart: state.autoStartDraft };
+  const value = { port: Number($('port').value), apiKey: $('local-key').value.trim(), autoStart: state.autoStartDraft, vision: state.visionDraft };
   let valid = true;
   const error = (field, text, input) => { $(field + '-error').textContent = text; $(input || field).setAttribute('aria-invalid', 'true'); valid = false; };
   if (!Number.isInteger(value.port) || value.port < 1024 || value.port > 65535) error('port', '请输入 1024–65535 之间的整数端口');
@@ -196,7 +196,7 @@ async function saveSettings(event) {
     if (nativeService) { const result = await bridge.saveSettings(value); if (result && result.ok === false) throw new Error(); }
     state.settings = value; state.keyVisible = false;
     if (wasRunning) { state.running = false; updateService(); if (nativeService) { await bridge.stopService(); const result = await bridge.startService(); if (result && result.ok === false) throw new Error(); } else await sleep(650); state.running = true; }
-    const stored = storage.set('preferences', { port: value.port, autoStart: value.autoStart });
+    const stored = storage.set('preferences', { port: value.port, autoStart: value.autoStart, vision: value.vision });
     if (!stored) toast('设置已应用，本机存储不可用'); else toast(wasRunning ? '设置已保存，服务已重启' + (nativeService ? '' : '（演示）') : '设置已保存');
     $('save-result').textContent = wasRunning ? '设置已应用，' + (nativeService ? '本机' : '演示') + '服务已重新启动。' : '设置已应用，服务保持停止。'; $('save-result').hidden = false;
     $('token-expiry').textContent = '待验证'; addLog((nativeService ? '' : '演示：') + '配置已更新' + (wasRunning ? '，服务已重启' : ''));
@@ -721,6 +721,7 @@ $('copy-api-key').addEventListener('click', () => { if (state.settings.apiKey) c
 $('reveal-key').addEventListener('click', () => { state.keyVisible = !state.keyVisible; $('reveal-key').setAttribute('aria-label', state.keyVisible ? '隐藏 API Key' : '显示 API Key'); $('reveal-key').title = state.keyVisible ? '隐藏 API Key' : '显示 API Key'; updateService(); });
 $('clear-logs').addEventListener('click', () => { $('log-lines').replaceChildren(); const empty = document.createElement('div'); empty.className = 'log-empty'; empty.textContent = '日志已清空,等待新的请求…'; $('log-lines').appendChild(empty); state.logCount = 0; $('log-count').textContent = '0 条'; toast('日志已清空'); });
 $('auto-start').addEventListener('click', () => { state.autoStartDraft = !state.autoStartDraft; $('auto-start').setAttribute('aria-checked', String(state.autoStartDraft)); });
+$('vision-forward').addEventListener('click', () => { state.visionDraft = !state.visionDraft; $('vision-forward').setAttribute('aria-checked', String(state.visionDraft)); });
 $('update-check').addEventListener('click', checkForUpdateUI);
 $('update-download').addEventListener('click', downloadUpdateUI);
 $('update-install').addEventListener('click', installUpdateUI);

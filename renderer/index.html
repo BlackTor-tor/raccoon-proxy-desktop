@@ -171,6 +171,13 @@
             </div>
             <button type="button" class="switch" id="auto-start" role="switch" aria-checked="true" aria-label="应用启动时自动开启服务"></button>
           </section>
+          <section class="block row-between">
+            <div>
+              <h2 class="tight">转发图片(视觉输入)</h2>
+              <p class="hint">开启后把请求里的图片原样转发给上游;关闭时降级为占位文字。请确认所选模型支持看图</p>
+            </div>
+            <button type="button" class="switch" id="vision-forward" role="switch" aria-checked="false" aria-label="转发图片给上游模型"></button>
+          </section>
           <div class="form-actions">
             <span class="hint" id="credentials-note">端口、密钥与启动偏好保存在本机;账号通过微信扫码授权写入 accounts.json。</span>
             <button type="submit" class="btn primary" id="save-settings"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>保存设置</button>

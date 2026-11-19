@@ -1275,7 +1275,7 @@ async function proxyChat(req, res) {
   if (typeof payload.model !== 'string' || !payload.model) payload.model = DEFAULT_MODEL;
 
   const wantStream = payload.stream === true;
-  const result = await runChatCore(payload, {
+  const result = await runChatCore(XHX_VISION ? payload : protocols.stripChatImages(payload), {
     res,
     onResult: (r) => {
       // 客户端要流式但只拿到整包(v1 降级):由本地拆成 SSE 帧回放

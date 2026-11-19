@@ -120,6 +120,20 @@ function sanitizeChatPayload(payload) {
   return out;
 }
 
+/** Chat 原生 image_url 部件:vision 关闭时降级为文字占位(与 Anthropic/Responses 路径同一策略) */
+function stripChatImages(payload) {
+  if (!Array.isArray(payload.messages)) return payload;
+  const messages = payload.messages.map((msg) => {
+    if (!msg || !Array.isArray(msg.content)) return msg;
+    const content = msg.content.map((part) => {
+      if (part && part.type === 'image_url') return { type: 'text', text: '[图片已省略:当前上游不支持视觉输入]' };
+      return part;
+    });
+    return { ...msg, content };
+  });
+  return { ...payload, messages };
+}
+
 /** 把客户端参数白名单化后塞进 payload */
 function applyAllowedParams(target, source) {
   for (const key of UPSTREAM_ALLOWED_PARAMS) {
@@ -1196,6 +1210,7 @@ function anthropicCountTokens(body) {
 module.exports = {
   UPSTREAM_ALLOWED_PARAMS,
   sanitizeChatPayload,
+  stripChatImages,
   resolveModel,
   anthropicToChat,
   chatToAnthropic,

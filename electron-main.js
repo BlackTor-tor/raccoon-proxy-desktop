@@ -15,7 +15,7 @@ if (process.env.XHX_USER_DATA) {
 // 渲染进程桥接契约(window.raccoonProxy):
 //   getStatus() -> {running, port, tokenExpiresAt, settings, version}
 //   startService()/stopService() -> {ok, error?}
-//   saveSettings(value) -> {ok}   value={port, apiKey, autoStart}
+//   saveSettings(value) -> {ok}   value={port, apiKey, autoStart, vision}
 //   checkUpdate() -> {ok, updateAvailable, current, latest, downloadUrl, pageUrl}
 //   downloadUpdate({url, latest}) -> {ok, started}   进度经 onUpdateProgress 推送
 //   installUpdate() -> {ok} / openReleases() -> {ok}
@@ -26,6 +26,7 @@ const DEFAULTS = {
   port: 8317,
   apiKey: '',
   autoStart: true,
+  vision: false, // 图片转发:关闭时降级为占位文字,开启后原样转发 image_url 给上游
   skipVersion: '', // 用户勾选「不再提醒」的版本号,只对该版本静默
 };
 
@@ -102,6 +103,7 @@ function startProxy() {
     XHX_CHECKIN_FILE: path.join(app.getPath('userData'), 'checkin.json'),
     XHX_USAGE_FILE: path.join(app.getPath('userData'), 'usage.json'),
     XHX_DEVICE_FILE: path.join(app.getPath('userData'), 'device.json'),
+    XHX_VISION: settings.vision ? '1' : '',
   };
   try {
     child = fork(path.join(__dirname, 'proxy', 'server.js'), [], { env, silent: true });
@@ -336,6 +338,7 @@ ipcMain.handle('settings:save', (_e, v) => {
     port: Math.min(65535, Math.max(1024, Math.floor(Number(v.port)) || 8317)),
     apiKey: String(v.apiKey ?? '').trim(),
     autoStart: v.autoStart === true,
+    vision: v.vision === true,
     skipVersion: typeof settings.skipVersion === 'string' ? settings.skipVersion : '',
   };
   persistSettings();
